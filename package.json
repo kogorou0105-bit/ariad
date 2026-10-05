@@ -1,0 +1,33 @@
+{
+  "name": "ariad",
+  "private": true,
+  "version": "0.0.0",
+  "packageManager": "npm@12.0.2",
+  "engines": {
+    "node": ">=24 <25",
+    "npm": ">=12 <13"
+  },
+  "workspaces": ["apps/*", "packages/*"],
+  "scripts": {
+    "dev:console": "npm run dev --workspace @ariad/console",
+    "dev:widget": "npm run dev --workspace @ariad/widget",
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint:frontend": "eslint apps packages *.config.mjs --max-warnings 0",
+    "check:frontend": "npm run lint:frontend && npm run typecheck && npm run build",
+    "check:go": "make check-go",
+    "check:commit": "commitlint --verbose",
+    "check": "make check",
+    "clean": "make clean"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "21.2.3",
+    "@commitlint/config-conventional": "21.2.3",
+    "@eslint/js": "10.0.1",
+    "eslint": "10.12.0",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "eslint-plugin-react-refresh": "0.5.7",
+    "globals": "17.13.0",
+    "typescript-eslint": "8.71.1"
+  }
+}

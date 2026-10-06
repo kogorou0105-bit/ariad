@@ -49,9 +49,13 @@ func main() {
 }
 
 func run(ctx context.Context, logger *slog.Logger, address string) error {
+	modelAdapter, err := platformmodel.NewFromEnvironment()
+	if err != nil {
+		return fmt.Errorf("configure model adapter: %w", err)
+	}
 	server := &http.Server{
 		Addr:              address,
-		Handler:           newRouter(logger),
+		Handler:           newRouter(logger, modelAdapter),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
@@ -77,7 +81,7 @@ func run(ctx context.Context, logger *slog.Logger, address string) error {
 	return server.Shutdown(shutdownCtx)
 }
 
-func newRouter(logger *slog.Logger) http.Handler {
+func newRouter(logger *slog.Logger, modelAdapter runtime.Model) http.Handler {
 	knowledgeService := knowledge.NewService(knowledge.NewMemoryRepository())
 	retrievalService := retrieval.NewService(knowledgeService)
 	agentReader := agent.NewStaticReader([]agent.PublishedAgent{{
@@ -88,7 +92,7 @@ func newRouter(logger *slog.Logger) http.Handler {
 		Instructions: "Answer only from the supplied evidence. " +
 			"Never invent facts and cite every factual answer.",
 	}})
-	runtimeService := runtime.NewService(agentReader, retrievalService, platformmodel.NewStub())
+	runtimeService := runtime.NewService(agentReader, retrievalService, modelAdapter)
 	conversationService := conversation.NewService(
 		conversation.NewMemoryRepository(),
 		runtimeService,

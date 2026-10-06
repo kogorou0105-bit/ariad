@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+
+	"ariad/internal/usage"
 )
 
 // MemoryRepository is a concurrency-safe local conversation repository.
@@ -55,12 +57,15 @@ func (r *MemoryRepository) ConversationExists(
 }
 
 // SaveTurn atomically stores one turn and its idempotency key in memory.
+// The usage fact is intentionally discarded: only the PostgreSQL
+// implementation persists usage and outbox facts transactionally.
 func (r *MemoryRepository) SaveTurn(
 	ctx context.Context,
 	workspaceID string,
 	idempotencyKey string,
 	payloadFingerprint string,
 	turn Turn,
+	_ usage.Fact,
 ) (Turn, error) {
 	if err := ctx.Err(); err != nil {
 		return Turn{}, fmt.Errorf("save turn: %w", err)

@@ -1,10 +1,7 @@
 // Package usage defines the immutable usage-fact recording boundary.
 package usage
 
-import (
-	"context"
-	"time"
-)
+import "time"
 
 // Status describes whether a model invocation consumed provider units.
 type Status string
@@ -32,23 +29,4 @@ type Fact struct {
 	OutputUnits      int64
 	Status           Status
 	OccurredAt       time.Time
-}
-
-// Recorder persists usage facts. Production implementations must not silently
-// discard facts; the no-op implementation is only for local development/tests.
-type Recorder interface {
-	Record(ctx context.Context, fact Fact) error
-}
-
-// NoopRecorder intentionally discards local-development usage facts.
-type NoopRecorder struct{}
-
-// NewNoopRecorder creates the explicitly local no-op recorder.
-func NewNoopRecorder() NoopRecorder {
-	return NoopRecorder{}
-}
-
-// Record implements Recorder.
-func (NoopRecorder) Record(context.Context, Fact) error {
-	return nil
 }

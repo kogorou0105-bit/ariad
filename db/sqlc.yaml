@@ -1,0 +1,16 @@
+version: "2"
+sql:
+  - engine: "postgresql"
+    schema: "migrations"
+    queries: "queries"
+    gen:
+      go:
+        package: "dbgen"
+        out: "generated"
+        sql_package: "database/sql"
+        emit_db_tags: true
+        emit_empty_slices: true
+        emit_json_tags: true
+        emit_prepared_queries: false
+        emit_result_struct_pointers: false
+        emit_interface: false

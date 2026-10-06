@@ -1,0 +1,21 @@
+name: ariad
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ariad
+      POSTGRES_USER: ariad
+      POSTGRES_PASSWORD: ariad
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ariad -d ariad"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - ariad-postgres-data:/var/lib/postgresql/data
+
+volumes:
+  ariad-postgres-data:

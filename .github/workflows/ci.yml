@@ -36,6 +36,11 @@ jobs:
           go-version: 1.26.5
           cache-dependency-path: go.sum
 
+      - name: Check generated code is up to date
+        run: |
+          go tool sqlc generate -f db/sqlc.yaml
+          git diff --exit-code -- db/generated/
+
       - name: Install Node.js dependencies
         run: npm ci
 

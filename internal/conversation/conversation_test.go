@@ -17,20 +17,35 @@ func (a fixedAnswerer) Answer(context.Context, runtime.AnswerCommand) (runtime.R
 	return a.result, nil
 }
 
-type recordingUsage struct {
+type recordingRepository struct {
+	Repository
 	facts []usage.Fact
 }
 
-func (r *recordingUsage) Record(_ context.Context, fact usage.Fact) error {
+func (r *recordingRepository) SaveTurn(
+	ctx context.Context,
+	workspaceID string,
+	idempotencyKey string,
+	payloadFingerprint string,
+	turn Turn,
+	fact usage.Fact,
+) (Turn, error) {
 	r.facts = append(r.facts, fact)
-	return nil
+	return r.Repository.SaveTurn(
+		ctx,
+		workspaceID,
+		idempotencyKey,
+		payloadFingerprint,
+		turn,
+		fact,
+	)
 }
 
 func TestSubmitQuestionRecordsUsageAndStableIDs(t *testing.T) {
 	t.Parallel()
-	recorder := &recordingUsage{}
+	repository := &recordingRepository{Repository: NewMemoryRepository()}
 	service := NewService(
-		NewMemoryRepository(),
+		repository,
 		fixedAnswerer{result: runtime.Result{
 			TerminalDisposition: runtime.DispositionAnswered,
 			Text:                "Grounded answer",
@@ -42,7 +57,6 @@ func TestSubmitQuestionRecordsUsageAndStableIDs(t *testing.T) {
 			}},
 			ModelUsage: runtime.ModelUsage{Invoked: true, Provider: "stub", OutputUnits: 4},
 		}},
-		recorder,
 	)
 	command := SubmitQuestionCommand{
 		WorkspaceID:    "ws_one",
@@ -65,26 +79,25 @@ func TestSubmitQuestionRecordsUsageAndStableIDs(t *testing.T) {
 	if first.Message.ID != second.Message.ID || first.Answer.ID != second.Answer.ID {
 		t.Fatalf("replay changed stable IDs: %#v then %#v", first, second)
 	}
-	if len(recorder.facts) != 1 {
-		t.Fatalf("usage calls = %d, want 1", len(recorder.facts))
+	if len(repository.facts) != 1 {
+		t.Fatalf("usage facts = %d, want 1", len(repository.facts))
 	}
-	if recorder.facts[0].WorkspaceID != command.WorkspaceID ||
-		recorder.facts[0].AnswerID != first.Answer.ID ||
-		recorder.facts[0].Status != usage.StatusCompleted {
-		t.Fatalf("usage fact = %#v", recorder.facts[0])
+	if repository.facts[0].WorkspaceID != command.WorkspaceID ||
+		repository.facts[0].AnswerID != first.Answer.ID ||
+		repository.facts[0].Status != usage.StatusCompleted {
+		t.Fatalf("usage fact = %#v", repository.facts[0])
 	}
 }
 
 func TestSubmitQuestionRejectsIdempotencyKeyWithDifferentPayload(t *testing.T) {
 	t.Parallel()
-	recorder := &recordingUsage{}
+	repository := &recordingRepository{Repository: NewMemoryRepository()}
 	service := NewService(
-		NewMemoryRepository(),
+		repository,
 		fixedAnswerer{result: runtime.Result{
 			TerminalDisposition: runtime.DispositionRefused,
 			Text:                "Not enough evidence",
 		}},
-		recorder,
 	)
 	command := SubmitQuestionCommand{
 		WorkspaceID:    "ws_one",
@@ -102,8 +115,8 @@ func TestSubmitQuestionRejectsIdempotencyKeyWithDifferentPayload(t *testing.T) {
 	if _, err := service.SubmitQuestion(context.Background(), command); !errors.Is(err, ErrIdempotencyConflict) {
 		t.Fatalf("error = %v, want ErrIdempotencyConflict", err)
 	}
-	if len(recorder.facts) != 1 {
-		t.Fatalf("usage calls = %d, want 1", len(recorder.facts))
+	if len(repository.facts) != 1 {
+		t.Fatalf("usage facts = %d, want 1", len(repository.facts))
 	}
 }
 
@@ -115,7 +128,6 @@ func TestConversationCannotBeReusedByAnotherVisitor(t *testing.T) {
 			TerminalDisposition: runtime.DispositionRefused,
 			Text:                "Not enough evidence",
 		}},
-		usage.NewNoopRecorder(),
 	)
 	first, err := service.SubmitQuestion(context.Background(), SubmitQuestionCommand{
 		WorkspaceID:    "ws_one",

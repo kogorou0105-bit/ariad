@@ -108,6 +108,7 @@ type Repository interface {
 		idempotencyKey string,
 		payloadFingerprint string,
 		turn Turn,
+		usageFact usage.Fact,
 	) (Turn, error)
 }
 
@@ -120,7 +121,6 @@ type QuestionSubmitter interface {
 type Service struct {
 	repository Repository
 	answerer   runtime.Answerer
-	recorder   usage.Recorder
 	clock      func() time.Time
 }
 
@@ -128,12 +128,10 @@ type Service struct {
 func NewService(
 	repository Repository,
 	answerer runtime.Answerer,
-	recorder usage.Recorder,
 ) *Service {
 	return &Service{
 		repository: repository,
 		answerer:   answerer,
-		recorder:   recorder,
 		clock:      time.Now,
 	}
 }
@@ -255,11 +253,7 @@ func (s *Service) SubmitQuestion(
 	if answered.ModelUsage.Invoked {
 		status = usage.StatusCompleted
 	}
-	// TODO(persistence): the PostgreSQL implementation must record this usage
-	// fact/outbox entry and SaveTurn in one transaction. This two-step path is
-	// valid only while the configured recorder and repository are local-memory
-	// development implementations.
-	if err := s.recorder.Record(ctx, usage.Fact{
+	usageFact := usage.Fact{
 		DeduplicationKey: "answer:" + answerID,
 		WorkspaceID:      command.WorkspaceID,
 		AgentID:          command.AgentID,
@@ -272,8 +266,6 @@ func (s *Service) SubmitQuestion(
 		OutputUnits:      answered.ModelUsage.OutputUnits,
 		Status:           status,
 		OccurredAt:       now,
-	}); err != nil {
-		return Turn{}, fmt.Errorf("record answer usage: %w", err)
 	}
 
 	saved, err := s.repository.SaveTurn(
@@ -282,6 +274,7 @@ func (s *Service) SubmitQuestion(
 		command.IdempotencyKey,
 		payloadFingerprint,
 		turn,
+		usageFact,
 	)
 	if err != nil {
 		return Turn{}, fmt.Errorf("save conversation turn: %w", err)

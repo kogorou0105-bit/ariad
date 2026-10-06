@@ -62,7 +62,7 @@ func (r *KnowledgeRepository) SaveSource(
 		return knowledge.SubmitTextResult{}, err
 	}
 	if found {
-		if previous.PayloadFingerprint != payloadFingerprint {
+		if previous.PayloadFingerprint != payloadFingerprint || previous.SourceURL != source.SourceURL {
 			return knowledge.SubmitTextResult{}, knowledge.ErrIdempotencyConflict
 		}
 		return previous.Result, nil
@@ -71,6 +71,7 @@ func (r *KnowledgeRepository) SaveSource(
 		WorkspaceID:        workspaceID,
 		SourceID:           source.ID,
 		Title:              source.Title,
+		SourceUrl:          nullableString(source.SourceURL),
 		IdempotencyKey:     idempotencyKey,
 		PayloadFingerprint: payloadFingerprint,
 		CreatedAt:          source.CreatedAt,
@@ -150,8 +151,14 @@ func findKnowledgeSubmission(
 			SourceID:    row.SourceID,
 			ChunkCount:  int(row.ChunkCount),
 		},
+		SourceTitle:        row.Title,
+		SourceURL:          row.SourceUrl.String,
 		PayloadFingerprint: row.PayloadFingerprint,
 	}, true, nil
+}
+
+func nullableString(value string) sql.NullString {
+	return sql.NullString{String: value, Valid: value != ""}
 }
 
 func validateKnowledgeWrite(

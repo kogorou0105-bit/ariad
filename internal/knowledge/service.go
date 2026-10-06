@@ -24,6 +24,7 @@ type Source struct {
 	ID          string
 	WorkspaceID string
 	Title       string
+	SourceURL   string
 	CreatedAt   time.Time
 }
 
@@ -43,6 +44,7 @@ type SubmitTextCommand struct {
 	RequestID      string
 	IdempotencyKey string
 	Title          string
+	SourceURL      string
 	Text           string
 }
 
@@ -56,6 +58,8 @@ type SubmitTextResult struct {
 // SubmissionRecord stores the result and payload identity for strict replay validation.
 type SubmissionRecord struct {
 	Result             SubmitTextResult
+	SourceTitle        string
+	SourceURL          string
 	PayloadFingerprint string
 }
 
@@ -83,6 +87,16 @@ type ChunkReader interface {
 	ListChunks(ctx context.Context, workspaceID string) ([]Chunk, error)
 }
 
+// Submitter exposes only the knowledge operation required by ingestion.
+type Submitter interface {
+	FindSubmission(
+		ctx context.Context,
+		workspaceID string,
+		idempotencyKey string,
+	) (SubmissionRecord, bool, error)
+	SubmitText(ctx context.Context, command SubmitTextCommand) (SubmitTextResult, error)
+}
+
 // Service accepts text and exposes immutable chunks.
 type Service struct {
 	repository Repository
@@ -92,6 +106,15 @@ type Service struct {
 // NewService creates a knowledge service.
 func NewService(repository Repository) *Service {
 	return &Service{repository: repository, clock: time.Now}
+}
+
+// FindSubmission exposes an idempotency lookup without exposing persistence.
+func (s *Service) FindSubmission(
+	ctx context.Context,
+	workspaceID string,
+	idempotencyKey string,
+) (SubmissionRecord, bool, error) {
+	return s.repository.FindSubmission(ctx, workspaceID, idempotencyKey)
 }
 
 // SubmitText creates an immutable source and its chunks, or replays the result
@@ -108,6 +131,7 @@ func (s *Service) SubmitText(
 		return SubmitTextResult{}, errors.New("workspace and idempotency key are required")
 	}
 	title := strings.TrimSpace(command.Title)
+	sourceURL := strings.TrimSpace(command.SourceURL)
 	if title == "" {
 		title = "Pasted text"
 	}
@@ -122,7 +146,7 @@ func (s *Service) SubmitText(
 		return SubmitTextResult{}, fmt.Errorf("find knowledge submission: %w", err)
 	}
 	if found {
-		if previous.PayloadFingerprint != payloadFingerprint {
+		if previous.PayloadFingerprint != payloadFingerprint || previous.SourceURL != sourceURL {
 			return SubmitTextResult{}, ErrIdempotencyConflict
 		}
 		return previous.Result, nil
@@ -136,6 +160,7 @@ func (s *Service) SubmitText(
 		ID:          sourceID,
 		WorkspaceID: command.WorkspaceID,
 		Title:       title,
+		SourceURL:   sourceURL,
 		CreatedAt:   s.clock().UTC(),
 	}
 

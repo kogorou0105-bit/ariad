@@ -1,6 +1,8 @@
 -- name: GetKnowledgeSubmission :one
 SELECT
     source.source_id,
+    source.title,
+    source.source_url,
     source.payload_fingerprint,
     count(chunk.chunk_id)::bigint AS chunk_count
 FROM knowledge_sources AS source
@@ -9,7 +11,7 @@ LEFT JOIN knowledge_chunks AS chunk
     AND chunk.source_id = source.source_id
 WHERE source.workspace_id = sqlc.arg(workspace_id)
   AND source.idempotency_key = sqlc.arg(idempotency_key)
-GROUP BY source.source_id, source.payload_fingerprint;
+GROUP BY source.source_id, source.title, source.source_url, source.payload_fingerprint;
 
 -- name: LockKnowledgeSubmission :exec
 SELECT pg_advisory_xact_lock(hashtextextended(
@@ -22,6 +24,7 @@ INSERT INTO knowledge_sources (
     workspace_id,
     source_id,
     title,
+    source_url,
     idempotency_key,
     payload_fingerprint,
     created_at
@@ -29,11 +32,12 @@ INSERT INTO knowledge_sources (
     sqlc.arg(workspace_id),
     sqlc.arg(source_id),
     sqlc.arg(title),
+    sqlc.narg(source_url),
     sqlc.arg(idempotency_key),
     sqlc.arg(payload_fingerprint),
     sqlc.arg(created_at)
 )
-RETURNING workspace_id, source_id, title, idempotency_key, payload_fingerprint, created_at;
+RETURNING workspace_id, source_id, title, source_url, idempotency_key, payload_fingerprint, created_at;
 
 -- name: InsertKnowledgeChunk :exec
 INSERT INTO knowledge_chunks (

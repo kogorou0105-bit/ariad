@@ -55,12 +55,13 @@ type KnowledgeChunk struct {
 }
 
 type KnowledgeSource struct {
-	WorkspaceID        string    `db:"workspace_id" json:"workspace_id"`
-	SourceID           string    `db:"source_id" json:"source_id"`
-	Title              string    `db:"title" json:"title"`
-	IdempotencyKey     string    `db:"idempotency_key" json:"idempotency_key"`
-	PayloadFingerprint string    `db:"payload_fingerprint" json:"payload_fingerprint"`
-	CreatedAt          time.Time `db:"created_at" json:"created_at"`
+	WorkspaceID        string         `db:"workspace_id" json:"workspace_id"`
+	SourceID           string         `db:"source_id" json:"source_id"`
+	Title              string         `db:"title" json:"title"`
+	IdempotencyKey     string         `db:"idempotency_key" json:"idempotency_key"`
+	PayloadFingerprint string         `db:"payload_fingerprint" json:"payload_fingerprint"`
+	CreatedAt          time.Time      `db:"created_at" json:"created_at"`
+	SourceUrl          sql.NullString `db:"source_url" json:"source_url"`
 }
 
 type Outbox struct {

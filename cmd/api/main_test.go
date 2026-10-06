@@ -4,14 +4,31 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 
+	"ariad/internal/conversation"
+	"ariad/internal/ingestion"
+	"ariad/internal/knowledge"
+	platformfetch "ariad/internal/platform/fetch"
 	platformmodel "ariad/internal/platform/model"
 )
+
+type staticPageFetcher struct {
+	page  ingestion.FetchedPage
+	err   error
+	calls int
+}
+
+func (f *staticPageFetcher) Fetch(context.Context, string) (ingestion.FetchedPage, error) {
+	f.calls++
+	return f.page, f.err
+}
 
 func TestRouterHealth(t *testing.T) {
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/healthz", nil)
@@ -121,6 +138,174 @@ func TestKnowledgeQuestionAnswerFlow(t *testing.T) {
 	}
 	if len(history.Turns) != 0 {
 		t.Fatalf("other visitor turns = %#v, want empty", history.Turns)
+	}
+}
+
+func TestURLIngestionQuestionAnswerFlowAndReplay(t *testing.T) {
+	t.Parallel()
+	fetcher := &staticPageFetcher{page: ingestion.FetchedPage{HTML: []byte(
+		`<html><head><title>Shipping guide</title></head><body>` +
+			`<script>ignore me</script><p>Express shipping arrives in two days.</p></body></html>`,
+	)}}
+	router := newRouterWithRepositories(
+		testLogger(),
+		platformmodel.NewStub(),
+		knowledge.NewMemoryRepository(),
+		conversation.NewMemoryRepository(),
+		fetcher,
+		0,
+	)
+	payload := map[string]string{
+		"workspace_id":    developmentWorkspaceID,
+		"url":             "https://example.com/shipping",
+		"title":           "",
+		"request_id":      "req_url",
+		"idempotency_key": "ik_url",
+	}
+	first := postJSONForTest(t, router, "/api/v1/ingestion/url", payload)
+	if first.Code != http.StatusCreated {
+		t.Fatalf("first ingestion status = %d, body = %s", first.Code, first.Body.String())
+	}
+	second := postJSONForTest(t, router, "/api/v1/ingestion/url", payload)
+	if second.Code != http.StatusCreated {
+		t.Fatalf("replay ingestion status = %d, body = %s", second.Code, second.Body.String())
+	}
+	var firstResult, secondResult submitKnowledgeResponse
+	if err := json.Unmarshal(first.Body.Bytes(), &firstResult); err != nil {
+		t.Fatalf("decode first ingestion: %v", err)
+	}
+	if err := json.Unmarshal(second.Body.Bytes(), &secondResult); err != nil {
+		t.Fatalf("decode replay ingestion: %v", err)
+	}
+	if firstResult.SourceID == "" || firstResult.SourceID != secondResult.SourceID || fetcher.calls != 1 {
+		t.Fatalf("ingestion results = %#v, %#v; fetch calls = %d", firstResult, secondResult, fetcher.calls)
+	}
+	payload["url"] = "https://example.com/different"
+	conflict := postJSONForTest(t, router, "/api/v1/ingestion/url", payload)
+	if conflict.Code != http.StatusConflict {
+		t.Fatalf("conflict status = %d, want %d; body = %s", conflict.Code, http.StatusConflict, conflict.Body.String())
+	}
+	var conflictEnvelope errorEnvelope
+	if err := json.Unmarshal(conflict.Body.Bytes(), &conflictEnvelope); err != nil {
+		t.Fatalf("decode conflict: %v", err)
+	}
+	if conflictEnvelope.Error.Code != "idempotency_conflict" || fetcher.calls != 1 {
+		t.Fatalf("conflict = %#v; fetch calls = %d", conflictEnvelope.Error, fetcher.calls)
+	}
+
+	questionResponse := postJSONForTest(t, router, "/api/v1/questions", map[string]string{
+		"workspace_id":    developmentWorkspaceID,
+		"agent_id":        developmentAgentID,
+		"conversation_id": "",
+		"visitor_id":      "visitor_url",
+		"channel":         "widget",
+		"locale":          "en",
+		"request_id":      "req_url_question",
+		"idempotency_key": "ik_url_question",
+		"question":        "How long does express shipping take?",
+	})
+	if questionResponse.Code != http.StatusOK {
+		t.Fatalf("question status = %d, body = %s", questionResponse.Code, questionResponse.Body.String())
+	}
+	var answered submitQuestionResponse
+	if err := json.Unmarshal(questionResponse.Body.Bytes(), &answered); err != nil {
+		t.Fatalf("decode answer: %v", err)
+	}
+	if answered.TerminalDisposition != "answered" || len(answered.Citations) != 1 ||
+		answered.Citations[0].Quote != "Express shipping arrives in two days." ||
+		answered.Citations[0].SourceTitle != "Shipping guide" {
+		t.Fatalf("answer = %#v", answered)
+	}
+}
+
+func TestURLIngestionReturnsMappedErrors(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		rawURL      string
+		page        ingestion.FetchedPage
+		fetchError  error
+		wantStatus  int
+		wantCode    string
+		wantMessage string
+	}{
+		{
+			name:        "invalid URL",
+			rawURL:      "://missing-scheme",
+			wantStatus:  http.StatusBadRequest,
+			wantCode:    "invalid_request",
+			wantMessage: ingestion.ErrInvalidURL.Error(),
+		},
+		{
+			name:        "unsafe destination",
+			fetchError:  ingestion.ErrUnsafeURL,
+			wantStatus:  http.StatusBadRequest,
+			wantCode:    "invalid_request",
+			wantMessage: ingestion.ErrUnsafeURL.Error(),
+		},
+		{
+			name:        "empty content",
+			page:        ingestion.FetchedPage{HTML: []byte(`<html><body></body></html>`)},
+			wantStatus:  http.StatusBadRequest,
+			wantCode:    "invalid_request",
+			wantMessage: ingestion.ErrNoContent.Error(),
+		},
+		{
+			name:        "remote status",
+			fetchError:  fmt.Errorf("%w: HTTP 404", platformfetch.ErrHTTPStatus),
+			wantStatus:  http.StatusBadGateway,
+			wantCode:    "fetch_failed",
+			wantMessage: "HTTP 404",
+		},
+		{
+			name:        "response too large",
+			fetchError:  platformfetch.ErrResponseTooLarge,
+			wantStatus:  http.StatusRequestEntityTooLarge,
+			wantCode:    "response_too_large",
+			wantMessage: platformfetch.ErrResponseTooLarge.Error(),
+		},
+		{
+			name:        "timeout",
+			fetchError:  context.DeadlineExceeded,
+			wantStatus:  http.StatusGatewayTimeout,
+			wantCode:    "fetch_timeout",
+			wantMessage: "URL fetch timed out",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			fetcher := &staticPageFetcher{page: test.page, err: test.fetchError}
+			router := newRouterWithRepositories(
+				testLogger(),
+				platformmodel.NewStub(),
+				knowledge.NewMemoryRepository(),
+				conversation.NewMemoryRepository(),
+				fetcher,
+				0,
+			)
+			rawURL := test.rawURL
+			if rawURL == "" {
+				rawURL = "https://example.com/page"
+			}
+			response := postJSONForTest(t, router, "/api/v1/ingestion/url", map[string]string{
+				"workspace_id":    developmentWorkspaceID,
+				"url":             rawURL,
+				"request_id":      "req_error",
+				"idempotency_key": "ik_error",
+			})
+			if response.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d; body = %s", response.Code, test.wantStatus, response.Body.String())
+			}
+			var envelope errorEnvelope
+			if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+				t.Fatalf("decode error: %v", err)
+			}
+			if envelope.Error.Code != test.wantCode ||
+				!strings.Contains(envelope.Error.Message, test.wantMessage) {
+				t.Fatalf("error = %#v, want code %q containing %q", envelope.Error, test.wantCode, test.wantMessage)
+			}
+		})
 	}
 }
 

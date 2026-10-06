@@ -64,6 +64,33 @@ func TestSubmitTextRejectsIdempotencyKeyWithDifferentPayload(t *testing.T) {
 	}
 }
 
+func TestSubmitTextPersistsSourceURLAndIncludesItInReplayIdentity(t *testing.T) {
+	t.Parallel()
+	repository := NewMemoryRepository()
+	service := NewService(repository)
+	command := SubmitTextCommand{
+		WorkspaceID:    "ws_one",
+		IdempotencyKey: "ik_url",
+		Title:          "Policy",
+		SourceURL:      "https://example.com/policy",
+		Text:           "Original text",
+	}
+	if _, err := service.SubmitText(context.Background(), command); err != nil {
+		t.Fatalf("submit text: %v", err)
+	}
+	stored, found, err := service.FindSubmission(context.Background(), command.WorkspaceID, command.IdempotencyKey)
+	if err != nil {
+		t.Fatalf("find submission: %v", err)
+	}
+	if !found || stored.SourceURL != command.SourceURL || stored.SourceTitle != command.Title {
+		t.Fatalf("stored submission = %#v", stored)
+	}
+	command.SourceURL = "https://example.com/other"
+	if _, err := service.SubmitText(context.Background(), command); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("changed URL error = %v, want ErrIdempotencyConflict", err)
+	}
+}
+
 func TestSubmitTextSplitsLongText(t *testing.T) {
 	t.Parallel()
 	service := NewService(NewMemoryRepository())

@@ -223,6 +223,7 @@ func testIdempotentReplay(
 		ID:          "src_replay",
 		WorkspaceID: "ws_replay",
 		Title:       "Replay source",
+		SourceURL:   "https://example.com/replay",
 		CreatedAt:   time.Now().UTC(),
 	}
 	chunks := []knowledge.Chunk{{
@@ -257,6 +258,17 @@ func testIdempotentReplay(
 	}
 	if firstSource != secondSource {
 		t.Fatalf("source replay = %#v, want %#v", secondSource, firstSource)
+	}
+	stored, found, err := knowledgeRepository.FindSubmission(
+		ctx,
+		source.WorkspaceID,
+		"idem_knowledge_replay",
+	)
+	if err != nil {
+		t.Fatalf("find source submission: %v", err)
+	}
+	if !found || stored.SourceURL != source.SourceURL || stored.SourceTitle != source.Title {
+		t.Fatalf("stored source submission = %#v", stored)
 	}
 
 	turn, fact := testTurn("replay", "ws_replay", "conv_replay", "visitor_replay")

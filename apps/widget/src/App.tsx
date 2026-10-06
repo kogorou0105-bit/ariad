@@ -8,6 +8,7 @@ import type {
   SubmitKnowledgeResponse,
   SubmitQuestionRequest,
   SubmitQuestionResponse,
+  SubmitURLRequest,
 } from "@ariad/contracts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useState } from "react";
@@ -109,6 +110,9 @@ export function WidgetPreview() {
   const queryClient = useQueryClient();
   const [sourceTitle, setSourceTitle] = useState("Product knowledge");
   const [sourceText, setSourceText] = useState("");
+  const [sourceURL, setSourceURL] = useState("");
+  const [sourceResult, setSourceResult] =
+    useState<SubmitKnowledgeResponse | null>(null);
   const [question, setQuestion] = useState("");
   const [submittedQuestion, setSubmittedQuestion] = useState("");
   const [conversationID, setConversationID] = useState(storedConversationID);
@@ -131,8 +135,20 @@ export function WidgetPreview() {
         "/api/v1/knowledge/text",
         request,
       ),
-    onSuccess: () => {
+    onMutate: () => setSourceResult(null),
+    onSuccess: (response) => {
       setSourceText("");
+      setSourceResult(response);
+    },
+  });
+
+  const urlMutation = useMutation({
+    mutationFn: (request: SubmitURLRequest) =>
+      postJSON<SubmitURLRequest, SubmitKnowledgeResponse>("/api/v1/ingestion/url", request),
+    onMutate: () => setSourceResult(null),
+    onSuccess: (response) => {
+      setSourceURL("");
+      setSourceResult(response);
     },
   });
 
@@ -151,12 +167,27 @@ export function WidgetPreview() {
   function submitKnowledge(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!sourceText.trim()) return;
+    urlMutation.reset();
     knowledgeMutation.mutate({
       workspace_id: workspaceID,
       request_id: createID("req"),
       idempotency_key: createID("ik"),
       title: sourceTitle.trim() || "Pasted text",
       text: sourceText,
+    });
+  }
+
+  function submitURL(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const trimmed = sourceURL.trim();
+    if (!trimmed) return;
+    knowledgeMutation.reset();
+    urlMutation.mutate({
+      workspace_id: workspaceID,
+      url: trimmed,
+      title: sourceTitle.trim(),
+      request_id: createID("req"),
+      idempotency_key: createID("ik"),
     });
   }
 
@@ -211,20 +242,41 @@ export function WidgetPreview() {
               placeholder="Paste facts the assistant may use…"
               rows={5}
             />
-            <button type="submit" disabled={knowledgeMutation.isPending || !sourceText.trim()}>
+            <button
+              type="submit"
+              disabled={knowledgeMutation.isPending || urlMutation.isPending || !sourceText.trim()}
+            >
               {knowledgeMutation.isPending ? "Saving…" : "Add knowledge"}
             </button>
           </form>
 
-          {knowledgeMutation.data && (
+          <form className="knowledge-form url-form" onSubmit={submitURL}>
+            <label htmlFor="source-url">Or add a webpage URL</label>
+            <input
+              id="source-url"
+              type="url"
+              value={sourceURL}
+              onChange={(event) => setSourceURL(event.target.value)}
+              placeholder="https://example.com/help"
+            />
+            <button
+              type="submit"
+              disabled={urlMutation.isPending || knowledgeMutation.isPending || !sourceURL.trim()}
+            >
+              {urlMutation.isPending ? "Fetching…" : "Add URL"}
+            </button>
+          </form>
+
+          {sourceResult && (
             <p className="notice success">
-              Source ready · {knowledgeMutation.data.chunk_count} chunk
-              {knowledgeMutation.data.chunk_count === 1 ? "" : "s"}
+              Source ready · {sourceResult.chunk_count} chunk
+              {sourceResult.chunk_count === 1 ? "" : "s"}
             </p>
           )}
           {knowledgeMutation.error && (
             <p className="notice error">{knowledgeMutation.error.message}</p>
           )}
+          {urlMutation.error && <p className="notice error">{urlMutation.error.message}</p>}
 
           <p className="label question-label">Conversation</p>
           <div className="message assistant">

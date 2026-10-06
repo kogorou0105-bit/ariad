@@ -16,9 +16,11 @@ import (
 
 	"ariad/internal/agent"
 	"ariad/internal/conversation"
+	"ariad/internal/ingestion"
 	"ariad/internal/knowledge"
 	"ariad/internal/platform/config"
 	"ariad/internal/platform/database"
+	platformfetch "ariad/internal/platform/fetch"
 	"ariad/internal/platform/health"
 	platformmodel "ariad/internal/platform/model"
 	"ariad/internal/platform/observability"
@@ -33,6 +35,7 @@ const (
 	developmentWorkspaceID = "ws_dev"
 	developmentAgentID     = "agent_dev"
 	maximumKnowledgeBody   = 1 << 20
+	maximumIngestionBody   = 16 << 10
 	maximumQuestionBody    = 64 << 10
 )
 
@@ -102,6 +105,7 @@ func newRouter(logger *slog.Logger, modelAdapter runtime.Model) http.Handler {
 		modelAdapter,
 		knowledge.NewMemoryRepository(),
 		conversation.NewMemoryRepository(),
+		platformfetch.NewHTTPFetcher(),
 		0,
 	)
 }
@@ -119,6 +123,7 @@ func newConfiguredRouter(
 			modelAdapter,
 			knowledge.NewMemoryRepository(),
 			conversation.NewMemoryRepository(),
+			platformfetch.NewHTTPFetcher(),
 			historyTurnLimit,
 		), func() error { return nil }, nil
 	}
@@ -135,6 +140,7 @@ func newConfiguredRouter(
 		modelAdapter,
 		database.NewKnowledgeRepository(postgres),
 		database.NewConversationRepository(postgres),
+		platformfetch.NewHTTPFetcher(),
 		historyTurnLimit,
 	)
 	return handler, postgres.Close, nil
@@ -145,9 +151,11 @@ func newRouterWithRepositories(
 	modelAdapter runtime.Model,
 	knowledgeRepository knowledge.Repository,
 	conversationRepository conversation.Repository,
+	pageFetcher ingestion.Fetcher,
 	historyTurnLimit int,
 ) http.Handler {
 	knowledgeService := knowledge.NewService(knowledgeRepository)
+	ingestionService := ingestion.NewService(pageFetcher, knowledgeService)
 	retrievalService := retrieval.NewService(knowledgeService)
 	agentReader := agent.NewStaticReader([]agent.PublishedAgent{{
 		WorkspaceID: developmentWorkspaceID,
@@ -167,19 +175,21 @@ func newRouterWithRepositories(
 	// identifiers derived from an authenticated token/session. Request-body IDs
 	// are compatibility fields to validate, never the authority used downstream.
 	scope := requestScope{workspaceID: developmentWorkspaceID, agentID: developmentAgentID}
-	return newRouterWithServices(logger, scope, knowledgeService, conversationService)
+	return newRouterWithServices(logger, scope, knowledgeService, ingestionService, conversationService)
 }
 
 func newRouterWithServices(
 	logger *slog.Logger,
 	scope requestScope,
 	knowledgeService *knowledge.Service,
+	ingestionService ingestion.URLSubmitter,
 	conversationService conversation.QuestionService,
 ) http.Handler {
 	handlers := apiHandlers{
 		logger:       logger,
 		scope:        scope,
 		knowledge:    knowledgeService,
+		ingestion:    ingestionService,
 		conversation: conversationService,
 	}
 	router := chi.NewRouter()
@@ -194,6 +204,7 @@ func newRouterWithServices(
 		bounded.Use(middleware.Timeout(30 * time.Second))
 		bounded.Get("/healthz", health.Handler)
 		bounded.Post("/api/v1/knowledge/text", handlers.submitKnowledge)
+		bounded.Post("/api/v1/ingestion/url", handlers.submitURL)
 		bounded.Post("/api/v1/questions", handlers.submitQuestion)
 		bounded.Get("/api/v1/conversations/{conversation_id}", handlers.listConversationTurns)
 	})
@@ -205,6 +216,7 @@ type apiHandlers struct {
 	logger       *slog.Logger
 	scope        requestScope
 	knowledge    *knowledge.Service
+	ingestion    ingestion.URLSubmitter
 	conversation conversation.QuestionService
 }
 
@@ -226,6 +238,14 @@ type submitKnowledgeResponse struct {
 	RequestID   string `json:"request_id"`
 	SourceID    string `json:"source_id"`
 	ChunkCount  int    `json:"chunk_count"`
+}
+
+type submitURLRequest struct {
+	WorkspaceID    string `json:"workspace_id"`
+	URL            string `json:"url"`
+	Title          string `json:"title"`
+	RequestID      string `json:"request_id"`
+	IdempotencyKey string `json:"idempotency_key"`
 }
 
 func (h apiHandlers) submitKnowledge(response http.ResponseWriter, request *http.Request) {
@@ -266,6 +286,67 @@ func (h apiHandlers) submitKnowledge(response http.ResponseWriter, request *http
 			return
 		}
 		h.writeError(response, http.StatusInternalServerError, "internal_error", "could not save knowledge", input.RequestID)
+		return
+	}
+	h.writeJSON(response, http.StatusCreated, submitKnowledgeResponse{
+		WorkspaceID: result.WorkspaceID,
+		RequestID:   input.RequestID,
+		SourceID:    result.SourceID,
+		ChunkCount:  result.ChunkCount,
+	})
+}
+
+func (h apiHandlers) submitURL(response http.ResponseWriter, request *http.Request) {
+	var input submitURLRequest
+	if err := decodeJSON(response, request, maximumIngestionBody, &input); err != nil {
+		h.writeError(response, http.StatusBadRequest, "invalid_request", err.Error(), input.RequestID)
+		return
+	}
+	if input.WorkspaceID != h.scope.workspaceID {
+		h.writeError(response, http.StatusForbidden, "workspace_not_allowed", "unknown workspace", input.RequestID)
+		return
+	}
+	if input.RequestID == "" || input.IdempotencyKey == "" {
+		h.writeError(
+			response,
+			http.StatusBadRequest,
+			"invalid_request",
+			"request_id and idempotency_key are required",
+			input.RequestID,
+		)
+		return
+	}
+	result, err := h.ingestion.SubmitURL(request.Context(), ingestion.SubmitURLCommand{
+		WorkspaceID:    h.scope.workspaceID,
+		URL:            input.URL,
+		Title:          input.Title,
+		RequestID:      input.RequestID,
+		IdempotencyKey: input.IdempotencyKey,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, ingestion.ErrInvalidURL),
+			errors.Is(err, ingestion.ErrUnsafeURL),
+			errors.Is(err, ingestion.ErrNoContent),
+			errors.Is(err, knowledge.ErrInvalidText):
+			h.writeError(response, http.StatusBadRequest, "invalid_request", err.Error(), input.RequestID)
+		case errors.Is(err, knowledge.ErrIdempotencyConflict):
+			h.writeError(response, http.StatusConflict, "idempotency_conflict", err.Error(), input.RequestID)
+		case errors.Is(err, platformfetch.ErrResponseTooLarge):
+			h.writeError(
+				response,
+				http.StatusRequestEntityTooLarge,
+				"response_too_large",
+				platformfetch.ErrResponseTooLarge.Error(),
+				input.RequestID,
+			)
+		case errors.Is(err, context.DeadlineExceeded):
+			h.writeError(response, http.StatusGatewayTimeout, "fetch_timeout", "URL fetch timed out", input.RequestID)
+		case errors.Is(err, platformfetch.ErrHTTPStatus):
+			h.writeError(response, http.StatusBadGateway, "fetch_failed", err.Error(), input.RequestID)
+		default:
+			h.writeError(response, http.StatusInternalServerError, "internal_error", "could not ingest URL", input.RequestID)
+		}
 		return
 	}
 	h.writeJSON(response, http.StatusCreated, submitKnowledgeResponse{

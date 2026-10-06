@@ -25,6 +25,14 @@ export interface SubmitKnowledgeResponse {
   chunk_count: number;
 }
 
+export interface SubmitURLRequest {
+  workspace_id: string;
+  url: string;
+  title: string;
+  request_id: string;
+  idempotency_key: string;
+}
+
 export interface SubmitQuestionRequest {
   workspace_id: string;
   agent_id: string;

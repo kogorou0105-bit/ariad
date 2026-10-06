@@ -18,12 +18,12 @@ import (
 	"ariad/internal/conversation"
 	"ariad/internal/knowledge"
 	"ariad/internal/platform/config"
+	"ariad/internal/platform/database"
 	"ariad/internal/platform/health"
 	platformmodel "ariad/internal/platform/model"
 	"ariad/internal/platform/observability"
 	"ariad/internal/retrieval"
 	"ariad/internal/runtime"
-	"ariad/internal/usage"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -42,27 +42,41 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	if err := run(ctx, logger, settings.APIAddress); err != nil {
+	if err := run(ctx, logger, settings); err != nil {
 		logger.Error("api stopped", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, logger *slog.Logger, address string) error {
+func run(ctx context.Context, logger *slog.Logger, settings config.Settings) error {
 	modelAdapter, err := platformmodel.NewFromEnvironment()
 	if err != nil {
 		return fmt.Errorf("configure model adapter: %w", err)
 	}
+	handler, closePersistence, err := newConfiguredRouter(
+		ctx,
+		logger,
+		modelAdapter,
+		settings.DatabaseURL,
+	)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := closePersistence(); closeErr != nil {
+			logger.Error("close persistence", "error", closeErr)
+		}
+	}()
 	server := &http.Server{
-		Addr:              address,
-		Handler:           newRouter(logger, modelAdapter),
+		Addr:              settings.APIAddress,
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
 
 	serveError := make(chan error, 1)
 	go func() {
-		logger.Info("api started", "address", address)
+		logger.Info("api started", "address", settings.APIAddress)
 		serveError <- server.ListenAndServe()
 	}()
 
@@ -82,7 +96,47 @@ func run(ctx context.Context, logger *slog.Logger, address string) error {
 }
 
 func newRouter(logger *slog.Logger, modelAdapter runtime.Model) http.Handler {
-	knowledgeService := knowledge.NewService(knowledge.NewMemoryRepository())
+	return newRouterWithRepositories(
+		logger,
+		modelAdapter,
+		knowledge.NewMemoryRepository(),
+		conversation.NewMemoryRepository(),
+	)
+}
+
+func newConfiguredRouter(
+	ctx context.Context,
+	logger *slog.Logger,
+	modelAdapter runtime.Model,
+	databaseURL string,
+) (http.Handler, func() error, error) {
+	if databaseURL == "" {
+		return newRouter(logger, modelAdapter), func() error { return nil }, nil
+	}
+	postgres, err := database.Open(ctx, databaseURL)
+	if err != nil {
+		return nil, nil, fmt.Errorf("connect persistence: %w", err)
+	}
+	if err := database.VerifySchemaReady(ctx, postgres); err != nil {
+		_ = postgres.Close()
+		return nil, nil, err
+	}
+	handler := newRouterWithRepositories(
+		logger,
+		modelAdapter,
+		database.NewKnowledgeRepository(postgres),
+		database.NewConversationRepository(postgres),
+	)
+	return handler, postgres.Close, nil
+}
+
+func newRouterWithRepositories(
+	logger *slog.Logger,
+	modelAdapter runtime.Model,
+	knowledgeRepository knowledge.Repository,
+	conversationRepository conversation.Repository,
+) http.Handler {
+	knowledgeService := knowledge.NewService(knowledgeRepository)
 	retrievalService := retrieval.NewService(knowledgeService)
 	agentReader := agent.NewStaticReader([]agent.PublishedAgent{{
 		WorkspaceID: developmentWorkspaceID,
@@ -94,9 +148,8 @@ func newRouter(logger *slog.Logger, modelAdapter runtime.Model) http.Handler {
 	}})
 	runtimeService := runtime.NewService(agentReader, retrievalService, modelAdapter)
 	conversationService := conversation.NewService(
-		conversation.NewMemoryRepository(),
+		conversationRepository,
 		runtimeService,
-		usage.NewNoopRecorder(),
 	)
 	// TODO(auth): replace this development-only scope with workspace and agent
 	// identifiers derived from an authenticated token/session. Request-body IDs

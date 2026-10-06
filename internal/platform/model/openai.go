@@ -282,6 +282,21 @@ func readProviderErrorMessage(body io.Reader) string {
 
 func userPrompt(request runtime.ModelRequest) string {
 	var prompt strings.Builder
+	if len(request.History) > 0 {
+		heading, rule, userLabel, assistantLabel := historyPromptLabels(request.Locale)
+		prompt.WriteString(heading)
+		prompt.WriteString("\n")
+		prompt.WriteString(rule)
+		prompt.WriteString("\n\n")
+		for _, turn := range request.History {
+			prompt.WriteString(userLabel)
+			prompt.WriteString(turn.Question)
+			prompt.WriteString("\n")
+			prompt.WriteString(assistantLabel)
+			prompt.WriteString(turn.Answer)
+			prompt.WriteString("\n\n")
+		}
+	}
 	prompt.WriteString("Question:\n")
 	prompt.WriteString(request.Question)
 	prompt.WriteString("\n\nEvidence:\n")
@@ -293,6 +308,16 @@ func userPrompt(request runtime.ModelRequest) string {
 		prompt.WriteString("\n\n")
 	}
 	return strings.TrimSpace(prompt.String())
+}
+
+func historyPromptLabels(
+	locale string,
+) (heading string, rule string, userLabel string, assistantLabel string) {
+	if normalized, ok := safeLocale(locale); ok && strings.HasPrefix(strings.ToLower(normalized), "zh") {
+		return "此前对话：", "以下是此前的对话，仅供参考；回答仍必须只依据本轮 Evidence。", "用户：", "助手："
+	}
+	return "Previous conversation:", "The following is prior conversation for reference only; " +
+		"the answer must still rely exclusively on this turn's Evidence.", "User: ", "Assistant: "
 }
 
 func parseCitations(content string) (string, []string) {

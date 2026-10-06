@@ -49,6 +49,55 @@ SELECT EXISTS (
       AND visitor_id = sqlc.arg(visitor_id)
 );
 
+-- name: ListConversationTurns :many
+WITH selected_messages AS (
+    SELECT
+        message_id,
+        workspace_id,
+        conversation_id,
+        visitor_id,
+        channel,
+        locale,
+        text,
+        created_at
+    FROM conversation_messages
+    WHERE conversation_messages.workspace_id = sqlc.arg(workspace_id)
+      AND conversation_messages.conversation_id = sqlc.arg(conversation_id)
+      AND conversation_messages.visitor_id = sqlc.arg(visitor_id)
+    ORDER BY conversation_messages.created_at DESC, conversation_messages.message_id DESC
+    LIMIT NULLIF(sqlc.arg(turn_limit)::integer, 0)
+)
+SELECT
+    messages.message_id,
+    messages.workspace_id,
+    messages.conversation_id,
+    messages.visitor_id,
+    messages.channel,
+    messages.locale,
+    messages.text AS message_text,
+    messages.created_at AS message_created_at,
+    answers.answer_id,
+    answers.agent_id,
+    answers.terminal_disposition,
+    answers.text AS answer_text,
+    answers.created_at AS answer_created_at,
+    citations.citation_id,
+    citations.evidence_id,
+    citations.source_id,
+    citations.chunk_id,
+    citations.source_title,
+    citations.quote,
+    citations.ordinal AS citation_ordinal
+FROM selected_messages AS messages
+JOIN conversation_answers AS answers
+  ON answers.workspace_id = messages.workspace_id
+ AND answers.message_id = messages.message_id
+ AND answers.conversation_id = messages.conversation_id
+LEFT JOIN conversation_citations AS citations
+  ON citations.workspace_id = answers.workspace_id
+ AND citations.answer_id = answers.answer_id
+ORDER BY messages.created_at, messages.message_id, citations.ordinal;
+
 -- name: GetConversationVisitor :one
 SELECT visitor_id
 FROM conversation_messages

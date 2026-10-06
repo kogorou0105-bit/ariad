@@ -58,6 +58,23 @@ export interface SubmitQuestionResponse {
   citations: AnswerCitation[];
 }
 
+export interface ConversationTurn {
+  message_id: string;
+  message: string;
+  message_created_at: string;
+  answer_id: string;
+  terminal_disposition: TerminalDisposition;
+  answer: string;
+  answer_created_at: string;
+  citations: AnswerCitation[];
+}
+
+export interface GetConversationHistoryResponse {
+  workspace_id: string;
+  conversation_id: string;
+  turns: ConversationTurn[];
+}
+
 export interface APIErrorResponse {
   error: {
     code: string;

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 
 	"ariad/internal/usage"
@@ -14,6 +15,42 @@ type MemoryRepository struct {
 	mu            sync.RWMutex
 	turns         map[string]map[string]TurnRecord
 	conversations map[string]map[string]string
+}
+
+// ListTurns returns the most recent limited set in chronological order. A
+// zero limit returns the full conversation.
+func (r *MemoryRepository) ListTurns(
+	ctx context.Context,
+	workspaceID string,
+	conversationID string,
+	visitorID string,
+	limit int,
+) ([]Turn, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("list turns: %w", err)
+	}
+	if limit < 0 {
+		return nil, errors.New("turn limit cannot be negative")
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	turns := make([]Turn, 0)
+	for _, record := range r.turns[workspaceID] {
+		if record.Turn.Message.ConversationID == conversationID &&
+			record.Turn.Message.VisitorID == visitorID {
+			turns = append(turns, cloneTurn(record.Turn))
+		}
+	}
+	sort.Slice(turns, func(left, right int) bool {
+		if turns[left].Message.CreatedAt.Equal(turns[right].Message.CreatedAt) {
+			return turns[left].Message.ID < turns[right].Message.ID
+		}
+		return turns[left].Message.CreatedAt.Before(turns[right].Message.CreatedAt)
+	})
+	if limit != AllTurnsLimit && len(turns) > limit {
+		turns = turns[len(turns)-limit:]
+	}
+	return turns, nil
 }
 
 // NewMemoryRepository creates an empty local conversation repository.

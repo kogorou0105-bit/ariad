@@ -33,6 +33,8 @@ func TestOpenAIGenerateParsesDeepSeekAnswerAndUsage(t *testing.T) {
 		if len(payload.Messages) != 2 ||
 			!strings.Contains(payload.Messages[0].Content, "CITATIONS: ev_xxx, ev_yyy") ||
 			!strings.Contains(payload.Messages[0].Content, "Answer using locale en.") ||
+			!strings.Contains(payload.Messages[1].Content, "prior conversation for reference only") ||
+			!strings.Contains(payload.Messages[1].Content, "User: Earlier question\nAssistant: Earlier answer") ||
 			!strings.Contains(payload.Messages[1].Content, "[ev_one]\nRefunds are available") {
 			t.Errorf("unexpected prompt: %#v", payload.Messages)
 		}
@@ -76,6 +78,21 @@ func TestOpenAIGenerateParsesDeepSeekAnswerAndUsage(t *testing.T) {
 	}
 	if result.Usage != wantUsage {
 		t.Fatalf("usage = %#v, want %#v", result.Usage, wantUsage)
+	}
+}
+
+func TestUserPromptLocalizesHistoryGuard(t *testing.T) {
+	t.Parallel()
+	request := modelRequest()
+	request.Locale = "zh-CN"
+	prompt := userPrompt(request)
+	if !strings.Contains(prompt, "此前对话：") ||
+		!strings.Contains(prompt, "以下是此前的对话，仅供参考；回答仍必须只依据本轮 Evidence。") ||
+		!strings.Contains(prompt, "用户：Earlier question\n助手：Earlier answer") {
+		t.Fatalf("localized history prompt = %q", prompt)
+	}
+	if strings.Contains(prompt, "Previous conversation:") {
+		t.Fatalf("localized history prompt contains English heading: %q", prompt)
 	}
 }
 
@@ -321,7 +338,11 @@ func modelRequest() runtime.ModelRequest {
 		AgentID:      "agent_one",
 		Instructions: "Be concise.",
 		Question:     "What is the refund window?",
-		Locale:       "en",
+		History: []runtime.HistoryTurn{{
+			Question: "Earlier question",
+			Answer:   "Earlier answer",
+		}},
+		Locale: "en",
 		Evidence: []runtime.ModelEvidence{
 			{EvidenceID: "ev_one", Text: "Refunds are available for 30 days."},
 			{EvidenceID: "ev_two", Text: "A receipt is required."},

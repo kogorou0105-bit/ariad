@@ -3,7 +3,9 @@ package conversation
 import (
 	"context"
 	"errors"
+	"strconv"
 	"testing"
+	"time"
 
 	"ariad/internal/runtime"
 	"ariad/internal/usage"
@@ -11,6 +13,19 @@ import (
 
 type fixedAnswerer struct {
 	result runtime.Result
+}
+
+type recordingAnswerer struct {
+	commands []runtime.AnswerCommand
+	result   runtime.Result
+}
+
+func (a *recordingAnswerer) Answer(
+	_ context.Context,
+	command runtime.AnswerCommand,
+) (runtime.Result, error) {
+	a.commands = append(a.commands, command)
+	return a.result, nil
 }
 
 func (a fixedAnswerer) Answer(context.Context, runtime.AnswerCommand) (runtime.Result, error) {
@@ -153,5 +168,91 @@ func TestConversationCannotBeReusedByAnotherVisitor(t *testing.T) {
 	})
 	if !errors.Is(err, ErrConversationNotFound) {
 		t.Fatalf("error = %v, want ErrConversationNotFound", err)
+	}
+}
+
+func TestSubmitQuestionLoadsRecentHistoryAndListTurnsReturnsAll(t *testing.T) {
+	t.Parallel()
+	repository := NewMemoryRepository()
+	answerer := &recordingAnswerer{result: runtime.Result{
+		TerminalDisposition: runtime.DispositionRefused,
+		Text:                "Not enough evidence",
+	}}
+	service := NewService(repository, answerer, WithHistoryTurnLimit(2))
+	now := time.Date(2026, time.October, 6, 10, 0, 0, 0, time.UTC)
+	service.clock = func() time.Time {
+		now = now.Add(time.Minute)
+		return now
+	}
+
+	command := SubmitQuestionCommand{
+		WorkspaceID:    "ws_one",
+		AgentID:        "agent_one",
+		VisitorID:      "visitor_one",
+		Channel:        ChannelWidget,
+		Locale:         "en",
+		RequestID:      "req_1",
+		IdempotencyKey: "ik_1",
+		Question:       "Question 1",
+	}
+	first, err := service.SubmitQuestion(context.Background(), command)
+	if err != nil {
+		t.Fatalf("submit first question: %v", err)
+	}
+	command.ConversationID = first.Message.ConversationID
+	for turnNumber := 2; turnNumber <= 4; turnNumber++ {
+		number := strconv.Itoa(turnNumber)
+		command.RequestID = "req_" + number
+		command.IdempotencyKey = "ik_" + number
+		command.Question = "Question " + number
+		if _, err := service.SubmitQuestion(context.Background(), command); err != nil {
+			t.Fatalf("submit question %d: %v", turnNumber, err)
+		}
+	}
+
+	lastCommand := answerer.commands[len(answerer.commands)-1]
+	if len(lastCommand.History) != 2 {
+		t.Fatalf("history length = %d, want 2", len(lastCommand.History))
+	}
+	if lastCommand.History[0].Question != "Question 2" ||
+		lastCommand.History[1].Question != "Question 3" {
+		t.Fatalf("history = %#v, want questions 2 and 3", lastCommand.History)
+	}
+
+	turns, err := service.ListTurns(
+		context.Background(),
+		"ws_one",
+		first.Message.ConversationID,
+		"visitor_one",
+	)
+	if err != nil {
+		t.Fatalf("list turns: %v", err)
+	}
+	if len(turns) != 4 || turns[0].Message.Text != "Question 1" || turns[3].Message.Text != "Question 4" {
+		t.Fatalf("turns = %#v", turns)
+	}
+	otherWorkspaceTurns, err := service.ListTurns(
+		context.Background(),
+		"ws_other",
+		first.Message.ConversationID,
+		"visitor_one",
+	)
+	if err != nil {
+		t.Fatalf("list other workspace turns: %v", err)
+	}
+	if len(otherWorkspaceTurns) != 0 {
+		t.Fatalf("other workspace turns = %#v, want empty", otherWorkspaceTurns)
+	}
+	otherVisitorTurns, err := service.ListTurns(
+		context.Background(),
+		"ws_one",
+		first.Message.ConversationID,
+		"visitor_other",
+	)
+	if err != nil {
+		t.Fatalf("list other visitor turns: %v", err)
+	}
+	if len(otherVisitorTurns) != 0 {
+		t.Fatalf("other visitor turns = %#v, want empty", otherVisitorTurns)
 	}
 }

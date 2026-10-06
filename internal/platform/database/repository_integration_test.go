@@ -36,6 +36,81 @@ func TestPostgresRepositories(t *testing.T) {
 	t.Run("enforces visitor ownership", func(t *testing.T) {
 		testVisitorOwnership(t, database, conversationRepository)
 	})
+	t.Run("lists recent turns in chronological order", func(t *testing.T) {
+		testListConversationTurns(t, conversationRepository)
+	})
+}
+
+func testListConversationTurns(t *testing.T, repository *ConversationRepository) {
+	t.Helper()
+	ctx := context.Background()
+	baseTime := time.Date(2026, time.October, 6, 9, 0, 0, 0, time.UTC)
+	for index, suffix := range []string{"history_one", "history_two", "history_three"} {
+		turn, fact := testTurn(suffix, "ws_history", "conv_history", "visitor_history")
+		createdAt := baseTime.Add(time.Duration(index) * time.Minute)
+		turn.Message.CreatedAt = createdAt
+		turn.Answer.CreatedAt = createdAt
+		fact.OccurredAt = createdAt
+		if _, err := repository.SaveTurn(
+			ctx,
+			turn.Message.WorkspaceID,
+			"idem_"+suffix,
+			"fingerprint_"+suffix,
+			turn,
+			fact,
+		); err != nil {
+			t.Fatalf("save turn %s: %v", suffix, err)
+		}
+	}
+
+	recent, err := repository.ListTurns(ctx, "ws_history", "conv_history", "visitor_history", 2)
+	if err != nil {
+		t.Fatalf("list recent turns: %v", err)
+	}
+	if len(recent) != 2 ||
+		recent[0].Message.ID != "msg_history_two" ||
+		recent[1].Message.ID != "msg_history_three" {
+		t.Fatalf("recent turns = %#v", recent)
+	}
+	all, err := repository.ListTurns(
+		ctx,
+		"ws_history",
+		"conv_history",
+		"visitor_history",
+		conversation.AllTurnsLimit,
+	)
+	if err != nil {
+		t.Fatalf("list all turns: %v", err)
+	}
+	if len(all) != 3 || all[0].Message.ID != "msg_history_one" {
+		t.Fatalf("all turns = %#v", all)
+	}
+	isolated, err := repository.ListTurns(
+		ctx,
+		"ws_other",
+		"conv_history",
+		"visitor_history",
+		conversation.AllTurnsLimit,
+	)
+	if err != nil {
+		t.Fatalf("list isolated turns: %v", err)
+	}
+	if len(isolated) != 0 {
+		t.Fatalf("isolated turns = %#v, want empty", isolated)
+	}
+	otherVisitor, err := repository.ListTurns(
+		ctx,
+		"ws_history",
+		"conv_history",
+		"visitor_other",
+		conversation.AllTurnsLimit,
+	)
+	if err != nil {
+		t.Fatalf("list other visitor turns: %v", err)
+	}
+	if len(otherVisitor) != 0 {
+		t.Fatalf("other visitor turns = %#v, want empty", otherVisitor)
+	}
 }
 
 func openTestDatabase(t *testing.T) *sql.DB {

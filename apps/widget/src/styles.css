@@ -27,6 +27,7 @@ input:focus, textarea:focus { border-color: #648371; box-shadow: 0 0 0 3px rgba(
 button { border: 0; border-radius: 10px; color: #fff; background: #28533b; cursor: pointer; }
 button:disabled { cursor: not-allowed; opacity: 0.5; }
 .knowledge-form button { justify-self: start; padding: 10px 14px; }
+.url-form { margin-top: 10px; }
 .notice { margin: 9px 2px 0; font-size: 12px; }
 .notice.success { color: #33734d; }
 .notice.error { color: #a13b38; }

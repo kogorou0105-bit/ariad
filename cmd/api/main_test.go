@@ -8,13 +8,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	platformmodel "ariad/internal/platform/model"
 )
 
 func TestRouterHealth(t *testing.T) {
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/healthz", nil)
 	response := httptest.NewRecorder()
 
-	newRouter(testLogger()).ServeHTTP(response, request)
+	newRouter(testLogger(), platformmodel.NewStub()).ServeHTTP(response, request)
 
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
@@ -23,7 +25,7 @@ func TestRouterHealth(t *testing.T) {
 
 func TestKnowledgeQuestionAnswerFlow(t *testing.T) {
 	t.Parallel()
-	router := newRouter(testLogger())
+	router := newRouter(testLogger(), platformmodel.NewStub())
 
 	knowledgeResponse := postJSONForTest(t, router, "/api/v1/knowledge/text", map[string]string{
 		"workspace_id":    developmentWorkspaceID,
@@ -68,17 +70,22 @@ func TestKnowledgeQuestionAnswerFlow(t *testing.T) {
 
 func TestQuestionRefusesWithoutEvidence(t *testing.T) {
 	t.Parallel()
-	response := postJSONForTest(t, newRouter(testLogger()), "/api/v1/questions", map[string]string{
-		"workspace_id":    developmentWorkspaceID,
-		"agent_id":        developmentAgentID,
-		"conversation_id": "",
-		"visitor_id":      "visitor_one",
-		"channel":         "widget",
-		"locale":          "en",
-		"request_id":      "req_question",
-		"idempotency_key": "ik_question",
-		"question":        "What is the refund window?",
-	})
+	response := postJSONForTest(
+		t,
+		newRouter(testLogger(), platformmodel.NewStub()),
+		"/api/v1/questions",
+		map[string]string{
+			"workspace_id":    developmentWorkspaceID,
+			"agent_id":        developmentAgentID,
+			"conversation_id": "",
+			"visitor_id":      "visitor_one",
+			"channel":         "widget",
+			"locale":          "en",
+			"request_id":      "req_question",
+			"idempotency_key": "ik_question",
+			"question":        "What is the refund window?",
+		},
+	)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
@@ -96,7 +103,7 @@ func TestQuestionRefusesWithoutEvidence(t *testing.T) {
 
 func TestKnowledgeIdempotencyConflict(t *testing.T) {
 	t.Parallel()
-	router := newRouter(testLogger())
+	router := newRouter(testLogger(), platformmodel.NewStub())
 	payload := map[string]string{
 		"workspace_id":    developmentWorkspaceID,
 		"request_id":      "req_one",

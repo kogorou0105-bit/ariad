@@ -58,6 +58,7 @@ func run(ctx context.Context, logger *slog.Logger, settings config.Settings) err
 		logger,
 		modelAdapter,
 		settings.DatabaseURL,
+		settings.ConversationHistoryTurnLimit,
 	)
 	if err != nil {
 		return err
@@ -101,6 +102,7 @@ func newRouter(logger *slog.Logger, modelAdapter runtime.Model) http.Handler {
 		modelAdapter,
 		knowledge.NewMemoryRepository(),
 		conversation.NewMemoryRepository(),
+		0,
 	)
 }
 
@@ -109,9 +111,16 @@ func newConfiguredRouter(
 	logger *slog.Logger,
 	modelAdapter runtime.Model,
 	databaseURL string,
+	historyTurnLimit int,
 ) (http.Handler, func() error, error) {
 	if databaseURL == "" {
-		return newRouter(logger, modelAdapter), func() error { return nil }, nil
+		return newRouterWithRepositories(
+			logger,
+			modelAdapter,
+			knowledge.NewMemoryRepository(),
+			conversation.NewMemoryRepository(),
+			historyTurnLimit,
+		), func() error { return nil }, nil
 	}
 	postgres, err := database.Open(ctx, databaseURL)
 	if err != nil {
@@ -126,6 +135,7 @@ func newConfiguredRouter(
 		modelAdapter,
 		database.NewKnowledgeRepository(postgres),
 		database.NewConversationRepository(postgres),
+		historyTurnLimit,
 	)
 	return handler, postgres.Close, nil
 }
@@ -135,6 +145,7 @@ func newRouterWithRepositories(
 	modelAdapter runtime.Model,
 	knowledgeRepository knowledge.Repository,
 	conversationRepository conversation.Repository,
+	historyTurnLimit int,
 ) http.Handler {
 	knowledgeService := knowledge.NewService(knowledgeRepository)
 	retrievalService := retrieval.NewService(knowledgeService)
@@ -150,6 +161,7 @@ func newRouterWithRepositories(
 	conversationService := conversation.NewService(
 		conversationRepository,
 		runtimeService,
+		conversation.WithHistoryTurnLimit(historyTurnLimit),
 	)
 	// TODO(auth): replace this development-only scope with workspace and agent
 	// identifiers derived from an authenticated token/session. Request-body IDs
@@ -162,7 +174,7 @@ func newRouterWithServices(
 	logger *slog.Logger,
 	scope requestScope,
 	knowledgeService *knowledge.Service,
-	conversationService conversation.QuestionSubmitter,
+	conversationService conversation.QuestionService,
 ) http.Handler {
 	handlers := apiHandlers{
 		logger:       logger,
@@ -183,6 +195,7 @@ func newRouterWithServices(
 		bounded.Get("/healthz", health.Handler)
 		bounded.Post("/api/v1/knowledge/text", handlers.submitKnowledge)
 		bounded.Post("/api/v1/questions", handlers.submitQuestion)
+		bounded.Get("/api/v1/conversations/{conversation_id}", handlers.listConversationTurns)
 	})
 
 	return router
@@ -192,7 +205,7 @@ type apiHandlers struct {
 	logger       *slog.Logger
 	scope        requestScope
 	knowledge    *knowledge.Service
-	conversation conversation.QuestionSubmitter
+	conversation conversation.QuestionService
 }
 
 type requestScope struct {
@@ -296,6 +309,23 @@ type submitQuestionResponse struct {
 	Citations           []citationResponse          `json:"citations"`
 }
 
+type conversationTurnResponse struct {
+	MessageID           string                      `json:"message_id"`
+	Message             string                      `json:"message"`
+	MessageCreatedAt    time.Time                   `json:"message_created_at"`
+	AnswerID            string                      `json:"answer_id"`
+	TerminalDisposition runtime.TerminalDisposition `json:"terminal_disposition"`
+	Answer              string                      `json:"answer"`
+	AnswerCreatedAt     time.Time                   `json:"answer_created_at"`
+	Citations           []citationResponse          `json:"citations"`
+}
+
+type listConversationTurnsResponse struct {
+	WorkspaceID    string                     `json:"workspace_id"`
+	ConversationID string                     `json:"conversation_id"`
+	Turns          []conversationTurnResponse `json:"turns"`
+}
+
 func (h apiHandlers) submitQuestion(response http.ResponseWriter, request *http.Request) {
 	var input submitQuestionRequest
 	if err := decodeJSON(response, request, maximumQuestionBody, &input); err != nil {
@@ -349,17 +379,6 @@ func (h apiHandlers) submitQuestion(response http.ResponseWriter, request *http.
 		return
 	}
 
-	citations := make([]citationResponse, 0, len(turn.Answer.Citations))
-	for _, citation := range turn.Answer.Citations {
-		citations = append(citations, citationResponse{
-			CitationID:  citation.ID,
-			EvidenceID:  citation.EvidenceID,
-			SourceID:    citation.SourceID,
-			ChunkID:     citation.ChunkID,
-			SourceTitle: citation.SourceTitle,
-			Quote:       citation.Quote,
-		})
-	}
 	h.writeJSON(response, http.StatusOK, submitQuestionResponse{
 		WorkspaceID:         turn.Answer.WorkspaceID,
 		AgentID:             turn.Answer.AgentID,
@@ -369,8 +388,73 @@ func (h apiHandlers) submitQuestion(response http.ResponseWriter, request *http.
 		RequestID:           input.RequestID,
 		TerminalDisposition: turn.Answer.TerminalDisposition,
 		Answer:              turn.Answer.Text,
-		Citations:           citations,
+		Citations:           citationResponses(turn.Answer.Citations),
 	})
+}
+
+func (h apiHandlers) listConversationTurns(response http.ResponseWriter, request *http.Request) {
+	workspaceID := request.URL.Query().Get("workspace_id")
+	requestID := middleware.GetReqID(request.Context())
+	if workspaceID != h.scope.workspaceID {
+		h.writeError(response, http.StatusForbidden, "workspace_not_allowed", "unknown workspace", requestID)
+		return
+	}
+	conversationID := chi.URLParam(request, "conversation_id")
+	visitorID := request.URL.Query().Get("visitor_id")
+	if visitorID == "" {
+		h.writeError(response, http.StatusBadRequest, "invalid_request", "visitor_id is required", requestID)
+		return
+	}
+	turns, err := h.conversation.ListTurns(
+		request.Context(),
+		h.scope.workspaceID,
+		conversationID,
+		visitorID,
+	)
+	if err != nil {
+		h.writeError(
+			response,
+			http.StatusInternalServerError,
+			"internal_error",
+			"could not load conversation",
+			requestID,
+		)
+		return
+	}
+
+	turnResponses := make([]conversationTurnResponse, 0, len(turns))
+	for _, turn := range turns {
+		turnResponses = append(turnResponses, conversationTurnResponse{
+			MessageID:           turn.Message.ID,
+			Message:             turn.Message.Text,
+			MessageCreatedAt:    turn.Message.CreatedAt,
+			AnswerID:            turn.Answer.ID,
+			TerminalDisposition: turn.Answer.TerminalDisposition,
+			Answer:              turn.Answer.Text,
+			AnswerCreatedAt:     turn.Answer.CreatedAt,
+			Citations:           citationResponses(turn.Answer.Citations),
+		})
+	}
+	h.writeJSON(response, http.StatusOK, listConversationTurnsResponse{
+		WorkspaceID:    h.scope.workspaceID,
+		ConversationID: conversationID,
+		Turns:          turnResponses,
+	})
+}
+
+func citationResponses(citations []conversation.Citation) []citationResponse {
+	responses := make([]citationResponse, 0, len(citations))
+	for _, citation := range citations {
+		responses = append(responses, citationResponse{
+			CitationID:  citation.ID,
+			EvidenceID:  citation.EvidenceID,
+			SourceID:    citation.SourceID,
+			ChunkID:     citation.ChunkID,
+			SourceTitle: citation.SourceTitle,
+			Quote:       citation.Quote,
+		})
+	}
+	return responses
 }
 
 func decodeJSON(

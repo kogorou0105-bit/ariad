@@ -64,6 +64,74 @@ func (r *ConversationRepository) ConversationExists(
 	return exists, nil
 }
 
+// ListTurns returns the most recent limited set in chronological order. A
+// zero limit returns the full conversation.
+func (r *ConversationRepository) ListTurns(
+	ctx context.Context,
+	workspaceID string,
+	conversationID string,
+	visitorID string,
+	limit int,
+) ([]conversation.Turn, error) {
+	if limit < 0 {
+		return nil, errors.New("turn limit cannot be negative")
+	}
+	databaseLimit, err := checkedInt32(limit)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := r.queries.ListConversationTurns(ctx, dbgen.ListConversationTurnsParams{
+		WorkspaceID:    workspaceID,
+		ConversationID: conversationID,
+		VisitorID:      visitorID,
+		TurnLimit:      databaseLimit,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query conversation turns: %w", err)
+	}
+
+	turns := make([]conversation.Turn, 0)
+	for _, row := range rows {
+		if len(turns) == 0 || turns[len(turns)-1].Message.ID != row.MessageID {
+			turns = append(turns, conversation.Turn{
+				Message: conversation.Message{
+					ID:             row.MessageID,
+					WorkspaceID:    row.WorkspaceID,
+					ConversationID: row.ConversationID,
+					VisitorID:      row.VisitorID,
+					Channel:        conversation.Channel(row.Channel),
+					Locale:         row.Locale,
+					Text:           row.MessageText,
+					CreatedAt:      row.MessageCreatedAt,
+				},
+				Answer: conversation.Answer{
+					ID:                  row.AnswerID,
+					WorkspaceID:         row.WorkspaceID,
+					ConversationID:      row.ConversationID,
+					MessageID:           row.MessageID,
+					AgentID:             row.AgentID,
+					TerminalDisposition: runtime.TerminalDisposition(row.TerminalDisposition),
+					Text:                row.AnswerText,
+					Citations:           []conversation.Citation{},
+					CreatedAt:           row.AnswerCreatedAt,
+				},
+			})
+		}
+		if row.CitationID.Valid {
+			turn := &turns[len(turns)-1]
+			turn.Answer.Citations = append(turn.Answer.Citations, conversation.Citation{
+				ID:          row.CitationID.String,
+				EvidenceID:  row.EvidenceID.String,
+				SourceID:    row.SourceID.String,
+				ChunkID:     row.ChunkID.String,
+				SourceTitle: row.SourceTitle.String,
+				Quote:       row.Quote.String,
+			})
+		}
+	}
+	return turns, nil
+}
+
 // SaveTurn commits the turn, usage fact and two independently consumable
 // outbox events atomically.
 func (r *ConversationRepository) SaveTurn(

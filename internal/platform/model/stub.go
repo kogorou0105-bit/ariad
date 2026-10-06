@@ -38,6 +38,9 @@ func (*Stub) Generate(
 		answer = "根据已提供的知识：" + selected.Text
 	}
 	input := request.Question + request.Instructions
+	for _, turn := range request.History {
+		input += turn.Question + turn.Answer
+	}
 	for _, item := range request.Evidence {
 		input += item.Text
 	}

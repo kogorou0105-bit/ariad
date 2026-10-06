@@ -363,6 +363,135 @@ func (q *Queries) ListConversationCitationsByAnswerID(ctx context.Context, arg L
 	return items, nil
 }
 
+const listConversationTurns = `-- name: ListConversationTurns :many
+WITH selected_messages AS (
+    SELECT
+        message_id,
+        workspace_id,
+        conversation_id,
+        visitor_id,
+        channel,
+        locale,
+        text,
+        created_at
+    FROM conversation_messages
+    WHERE conversation_messages.workspace_id = $1
+      AND conversation_messages.conversation_id = $2
+      AND conversation_messages.visitor_id = $3
+    ORDER BY conversation_messages.created_at DESC, conversation_messages.message_id DESC
+    LIMIT NULLIF($4::integer, 0)
+)
+SELECT
+    messages.message_id,
+    messages.workspace_id,
+    messages.conversation_id,
+    messages.visitor_id,
+    messages.channel,
+    messages.locale,
+    messages.text AS message_text,
+    messages.created_at AS message_created_at,
+    answers.answer_id,
+    answers.agent_id,
+    answers.terminal_disposition,
+    answers.text AS answer_text,
+    answers.created_at AS answer_created_at,
+    citations.citation_id,
+    citations.evidence_id,
+    citations.source_id,
+    citations.chunk_id,
+    citations.source_title,
+    citations.quote,
+    citations.ordinal AS citation_ordinal
+FROM selected_messages AS messages
+JOIN conversation_answers AS answers
+  ON answers.workspace_id = messages.workspace_id
+ AND answers.message_id = messages.message_id
+ AND answers.conversation_id = messages.conversation_id
+LEFT JOIN conversation_citations AS citations
+  ON citations.workspace_id = answers.workspace_id
+ AND citations.answer_id = answers.answer_id
+ORDER BY messages.created_at, messages.message_id, citations.ordinal
+`
+
+type ListConversationTurnsParams struct {
+	WorkspaceID    string `db:"workspace_id" json:"workspace_id"`
+	ConversationID string `db:"conversation_id" json:"conversation_id"`
+	VisitorID      string `db:"visitor_id" json:"visitor_id"`
+	TurnLimit      int32  `db:"turn_limit" json:"turn_limit"`
+}
+
+type ListConversationTurnsRow struct {
+	MessageID           string         `db:"message_id" json:"message_id"`
+	WorkspaceID         string         `db:"workspace_id" json:"workspace_id"`
+	ConversationID      string         `db:"conversation_id" json:"conversation_id"`
+	VisitorID           string         `db:"visitor_id" json:"visitor_id"`
+	Channel             string         `db:"channel" json:"channel"`
+	Locale              string         `db:"locale" json:"locale"`
+	MessageText         string         `db:"message_text" json:"message_text"`
+	MessageCreatedAt    time.Time      `db:"message_created_at" json:"message_created_at"`
+	AnswerID            string         `db:"answer_id" json:"answer_id"`
+	AgentID             string         `db:"agent_id" json:"agent_id"`
+	TerminalDisposition string         `db:"terminal_disposition" json:"terminal_disposition"`
+	AnswerText          string         `db:"answer_text" json:"answer_text"`
+	AnswerCreatedAt     time.Time      `db:"answer_created_at" json:"answer_created_at"`
+	CitationID          sql.NullString `db:"citation_id" json:"citation_id"`
+	EvidenceID          sql.NullString `db:"evidence_id" json:"evidence_id"`
+	SourceID            sql.NullString `db:"source_id" json:"source_id"`
+	ChunkID             sql.NullString `db:"chunk_id" json:"chunk_id"`
+	SourceTitle         sql.NullString `db:"source_title" json:"source_title"`
+	Quote               sql.NullString `db:"quote" json:"quote"`
+	CitationOrdinal     sql.NullInt32  `db:"citation_ordinal" json:"citation_ordinal"`
+}
+
+func (q *Queries) ListConversationTurns(ctx context.Context, arg ListConversationTurnsParams) ([]ListConversationTurnsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listConversationTurns,
+		arg.WorkspaceID,
+		arg.ConversationID,
+		arg.VisitorID,
+		arg.TurnLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListConversationTurnsRow{}
+	for rows.Next() {
+		var i ListConversationTurnsRow
+		if err := rows.Scan(
+			&i.MessageID,
+			&i.WorkspaceID,
+			&i.ConversationID,
+			&i.VisitorID,
+			&i.Channel,
+			&i.Locale,
+			&i.MessageText,
+			&i.MessageCreatedAt,
+			&i.AnswerID,
+			&i.AgentID,
+			&i.TerminalDisposition,
+			&i.AnswerText,
+			&i.AnswerCreatedAt,
+			&i.CitationID,
+			&i.EvidenceID,
+			&i.SourceID,
+			&i.ChunkID,
+			&i.SourceTitle,
+			&i.Quote,
+			&i.CitationOrdinal,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const lockConversation = `-- name: LockConversation :exec
 SELECT pg_advisory_xact_lock(hashtextextended(
     'conversation:' || $1 || ':' || $2,

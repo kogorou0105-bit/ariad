@@ -1,12 +1,15 @@
 import type {
   APIErrorResponse,
+  AnswerCitation,
   AppSurface,
+  ConversationTurn,
+  GetConversationHistoryResponse,
   SubmitKnowledgeRequest,
   SubmitKnowledgeResponse,
   SubmitQuestionRequest,
   SubmitQuestionResponse,
 } from "@ariad/contracts";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useState } from "react";
 
 const surface: AppSurface = "widget";
@@ -24,6 +27,10 @@ function visitorID(): string {
   const created = createID("visitor");
   sessionStorage.setItem(storageKey, created);
   return created;
+}
+
+function storedConversationID(): string {
+  return sessionStorage.getItem("ariad:conversation_id") ?? "";
 }
 
 async function postJSON<Request, Response>(path: string, body: Request): Promise<Response> {
@@ -50,13 +57,73 @@ async function postJSON<Request, Response>(path: string, body: Request): Promise
   return payload as Response;
 }
 
+async function getJSON<Response>(path: string): Promise<Response> {
+  const response = await fetch(path);
+  const responseText = await response.text();
+  let payload: unknown;
+  try {
+    payload = JSON.parse(responseText) as unknown;
+  } catch {
+    throw new Error(
+      response.ok
+        ? "The API returned an invalid response."
+        : `Request failed (${response.status}).`,
+    );
+  }
+  if (!response.ok) {
+    const failure = payload as APIErrorResponse;
+    throw new Error(failure.error?.message ?? `Request failed (${response.status})`);
+  }
+  return payload as Response;
+}
+
+function AnswerCard({
+  answer,
+  citations,
+  disposition,
+}: {
+  answer: string;
+  citations: AnswerCitation[];
+  disposition: ConversationTurn["terminal_disposition"];
+}) {
+  return (
+    <article className={`answer ${disposition}`}>
+      <span className="disposition">{disposition}</span>
+      <p>{answer}</p>
+      {citations.length > 0 && (
+        <div className="citations">
+          <strong>Sources</strong>
+          {citations.map((citation) => (
+            <blockquote key={citation.citation_id}>
+              <cite>{citation.source_title}</cite>
+              {citation.quote}
+            </blockquote>
+          ))}
+        </div>
+      )}
+    </article>
+  );
+}
+
 export function WidgetPreview() {
+  const queryClient = useQueryClient();
   const [sourceTitle, setSourceTitle] = useState("Product knowledge");
   const [sourceText, setSourceText] = useState("");
   const [question, setQuestion] = useState("");
   const [submittedQuestion, setSubmittedQuestion] = useState("");
-  const [conversationID, setConversationID] = useState("");
+  const [conversationID, setConversationID] = useState(storedConversationID);
   const [currentVisitorID] = useState(visitorID);
+
+  const historyQuery = useQuery({
+    queryKey: ["conversation", workspaceID, currentVisitorID, conversationID],
+    queryFn: () =>
+      getJSON<GetConversationHistoryResponse>(
+        `/api/v1/conversations/${encodeURIComponent(conversationID)}` +
+          `?workspace_id=${encodeURIComponent(workspaceID)}` +
+          `&visitor_id=${encodeURIComponent(currentVisitorID)}`,
+      ),
+    enabled: conversationID !== "",
+  });
 
   const knowledgeMutation = useMutation({
     mutationFn: (request: SubmitKnowledgeRequest) =>
@@ -73,7 +140,11 @@ export function WidgetPreview() {
     mutationFn: (request: SubmitQuestionRequest) =>
       postJSON<SubmitQuestionRequest, SubmitQuestionResponse>("/api/v1/questions", request),
     onSuccess: (response) => {
+      sessionStorage.setItem("ariad:conversation_id", response.conversation_id);
       setConversationID(response.conversation_id);
+      void queryClient.invalidateQueries({
+        queryKey: ["conversation", workspaceID, currentVisitorID, response.conversation_id],
+      });
     },
   });
 
@@ -109,6 +180,8 @@ export function WidgetPreview() {
   }
 
   const answer = questionMutation.data;
+  const turns = historyQuery.data?.turns ?? [];
+  const answerAlreadyLoaded = turns.some((turn) => turn.answer_id === answer?.answer_id);
 
   return (
     <main className="preview" data-surface={surface}>
@@ -159,27 +232,40 @@ export function WidgetPreview() {
             evidence is insufficient.
           </div>
 
-          {submittedQuestion && <div className="message visitor">{submittedQuestion}</div>}
-          {questionMutation.isPending && <div className="message assistant muted">Thinking…</div>}
+          {historyQuery.isPending && conversationID && (
+            <div className="message assistant muted">Loading conversation…</div>
+          )}
+          {historyQuery.error && (
+            <p className="notice error">{historyQuery.error.message}</p>
+          )}
+          {turns.map((turn) => (
+            <div className="turn" key={turn.message_id}>
+              <div className="message visitor">{turn.message}</div>
+              <AnswerCard
+                answer={turn.answer}
+                citations={turn.citations}
+                disposition={turn.terminal_disposition}
+              />
+            </div>
+          ))}
+          {questionMutation.isPending && submittedQuestion && (
+            <>
+              <div className="message visitor">{submittedQuestion}</div>
+              <div className="message assistant muted">Thinking…</div>
+            </>
+          )}
           {questionMutation.error && (
             <p className="notice error">{questionMutation.error.message}</p>
           )}
-          {answer && (
-            <article className={`answer ${answer.terminal_disposition}`}>
-              <span className="disposition">{answer.terminal_disposition}</span>
-              <p>{answer.answer}</p>
-              {answer.citations.length > 0 && (
-                <div className="citations">
-                  <strong>Sources</strong>
-                  {answer.citations.map((citation) => (
-                    <blockquote key={citation.citation_id}>
-                      <cite>{citation.source_title}</cite>
-                      {citation.quote}
-                    </blockquote>
-                  ))}
-                </div>
-              )}
-            </article>
+          {answer && !questionMutation.isPending && !answerAlreadyLoaded && (
+            <div className="turn">
+              <div className="message visitor">{submittedQuestion}</div>
+              <AnswerCard
+                answer={answer.answer}
+                citations={answer.citations}
+                disposition={answer.terminal_disposition}
+              />
+            </div>
           )}
         </div>
 

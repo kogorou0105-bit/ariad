@@ -21,6 +21,12 @@ var (
 	ErrIdempotencyConflict  = errors.New("idempotency key reused with different question payload")
 )
 
+const (
+	defaultHistoryTurnLimit = 5
+	// AllTurnsLimit requests every persisted turn from Repository.ListTurns.
+	AllTurnsLimit = 0
+)
+
 // Channel identifies a conversation ingress adapter.
 type Channel string
 
@@ -102,6 +108,15 @@ type Repository interface {
 		conversationID string,
 		visitorID string,
 	) (bool, error)
+	// ListTurns returns visitor-owned turns in chronological order. A positive
+	// limit selects the most recent turns; AllTurnsLimit returns every turn.
+	ListTurns(
+		ctx context.Context,
+		workspaceID string,
+		conversationID string,
+		visitorID string,
+		limit int,
+	) ([]Turn, error)
 	SaveTurn(
 		ctx context.Context,
 		workspaceID string,
@@ -117,23 +132,82 @@ type QuestionSubmitter interface {
 	SubmitQuestion(ctx context.Context, command SubmitQuestionCommand) (Turn, error)
 }
 
+// HistoryReader reads persisted turns for one workspace-scoped conversation.
+type HistoryReader interface {
+	ListTurns(
+		ctx context.Context,
+		workspaceID string,
+		conversationID string,
+		visitorID string,
+	) ([]Turn, error)
+}
+
+// QuestionService combines the write and history-read conversation use cases.
+type QuestionService interface {
+	QuestionSubmitter
+	HistoryReader
+}
+
 // Service owns the conversation write path, including usage recording.
 type Service struct {
-	repository Repository
-	answerer   runtime.Answerer
-	clock      func() time.Time
+	repository   Repository
+	answerer     runtime.Answerer
+	historyLimit int
+	clock        func() time.Time
+}
+
+// ServiceOption configures the conversation service.
+type ServiceOption func(*Service)
+
+// WithHistoryTurnLimit sets the number of recent turns sent to the runtime.
+// Non-positive values retain the default.
+func WithHistoryTurnLimit(limit int) ServiceOption {
+	return func(service *Service) {
+		if limit > 0 {
+			service.historyLimit = limit
+		}
+	}
 }
 
 // NewService creates a conversation service.
 func NewService(
 	repository Repository,
 	answerer runtime.Answerer,
+	options ...ServiceOption,
 ) *Service {
-	return &Service{
-		repository: repository,
-		answerer:   answerer,
-		clock:      time.Now,
+	service := &Service{
+		repository:   repository,
+		answerer:     answerer,
+		historyLimit: defaultHistoryTurnLimit,
+		clock:        time.Now,
 	}
+	for _, option := range options {
+		option(service)
+	}
+	return service
+}
+
+// ListTurns returns all persisted turns in chronological order.
+func (s *Service) ListTurns(
+	ctx context.Context,
+	workspaceID string,
+	conversationID string,
+	visitorID string,
+) ([]Turn, error) {
+	if workspaceID == "" || conversationID == "" || visitorID == "" {
+		return nil, errors.New("workspace, conversation and visitor are required")
+	}
+	turns, err := s.repository.ListTurns(
+		ctx,
+		workspaceID,
+		conversationID,
+		visitorID,
+		AllTurnsLimit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list conversation turns: %w", err)
+	}
+	return turns, nil
 }
 
 // SubmitQuestion runs the answer workflow and persists an idempotent turn.
@@ -181,6 +255,27 @@ func (s *Service) SubmitQuestion(
 		}
 	}
 
+	history := make([]runtime.HistoryTurn, 0)
+	if command.ConversationID != "" {
+		previousTurns, historyErr := s.repository.ListTurns(
+			ctx,
+			command.WorkspaceID,
+			command.ConversationID,
+			command.VisitorID,
+			s.historyLimit,
+		)
+		if historyErr != nil {
+			return Turn{}, fmt.Errorf("list conversation history: %w", historyErr)
+		}
+		history = make([]runtime.HistoryTurn, 0, len(previousTurns))
+		for _, previousTurn := range previousTurns {
+			history = append(history, runtime.HistoryTurn{
+				Question: previousTurn.Message.Text,
+				Answer:   previousTurn.Answer.Text,
+			})
+		}
+	}
+
 	conversationID := command.ConversationID
 	if conversationID == "" {
 		conversationID, err = randomID("conv")
@@ -201,6 +296,7 @@ func (s *Service) SubmitQuestion(
 		WorkspaceID: command.WorkspaceID,
 		AgentID:     command.AgentID,
 		Question:    command.Question,
+		History:     history,
 		Locale:      command.Locale,
 		RequestID:   command.RequestID,
 	})

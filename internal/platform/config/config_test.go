@@ -6,6 +6,7 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("ARIAD_API_ADDR", "")
 	t.Setenv("ARIAD_LOG_LEVEL", "")
 	t.Setenv("ARIAD_DATABASE_URL", "")
+	t.Setenv("ARIAD_CONVERSATION_HISTORY_TURN_LIMIT", "")
 
 	settings := Load()
 	if settings.APIAddress != ":8080" {
@@ -17,12 +18,16 @@ func TestLoadDefaults(t *testing.T) {
 	if settings.DatabaseURL != "" {
 		t.Fatalf("DatabaseURL = %q, want empty", settings.DatabaseURL)
 	}
+	if settings.ConversationHistoryTurnLimit != 5 {
+		t.Fatalf("ConversationHistoryTurnLimit = %d, want 5", settings.ConversationHistoryTurnLimit)
+	}
 }
 
 func TestLoadEnvironment(t *testing.T) {
 	t.Setenv("ARIAD_API_ADDR", "127.0.0.1:9090")
 	t.Setenv("ARIAD_LOG_LEVEL", "debug")
 	t.Setenv("ARIAD_DATABASE_URL", "postgres://ariad:secret@localhost:5432/ariad")
+	t.Setenv("ARIAD_CONVERSATION_HISTORY_TURN_LIMIT", "8")
 
 	settings := Load()
 	if settings.APIAddress != "127.0.0.1:9090" {
@@ -33,5 +38,15 @@ func TestLoadEnvironment(t *testing.T) {
 	}
 	if settings.DatabaseURL != "postgres://ariad:secret@localhost:5432/ariad" {
 		t.Fatalf("DatabaseURL = %q", settings.DatabaseURL)
+	}
+	if settings.ConversationHistoryTurnLimit != 8 {
+		t.Fatalf("ConversationHistoryTurnLimit = %d", settings.ConversationHistoryTurnLimit)
+	}
+}
+
+func TestLoadFallsBackForInvalidHistoryLimit(t *testing.T) {
+	t.Setenv("ARIAD_CONVERSATION_HISTORY_TURN_LIMIT", "0")
+	if got := Load().ConversationHistoryTurnLimit; got != 5 {
+		t.Fatalf("ConversationHistoryTurnLimit = %d, want 5", got)
 	}
 }

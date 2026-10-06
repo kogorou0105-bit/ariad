@@ -31,8 +31,16 @@ type AnswerCommand struct {
 	WorkspaceID string
 	AgentID     string
 	Question    string
+	History     []HistoryTurn
 	Locale      string
 	RequestID   string
+}
+
+// HistoryTurn is a previous question and answer supplied as conversational
+// context. It deliberately contains no evidence or citation identifiers.
+type HistoryTurn struct {
+	Question string
+	Answer   string
 }
 
 // Citation is mapped by the server from evidence retrieved in the same turn.
@@ -80,6 +88,7 @@ type ModelRequest struct {
 	AgentID      string
 	Instructions string
 	Question     string
+	History      []HistoryTurn
 	Locale       string
 	Evidence     []ModelEvidence
 }
@@ -141,6 +150,7 @@ func (s *Service) Answer(ctx context.Context, command AnswerCommand) (Result, er
 		AgentID:      command.AgentID,
 		Instructions: published.Instructions,
 		Question:     command.Question,
+		History:      append([]HistoryTurn(nil), command.History...),
 		Locale:       command.Locale,
 		Evidence:     modelEvidence,
 	})

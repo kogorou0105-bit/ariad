@@ -14,6 +14,8 @@ import (
 const getKnowledgeSubmission = `-- name: GetKnowledgeSubmission :one
 SELECT
     source.source_id,
+    source.title,
+    source.source_url,
     source.payload_fingerprint,
     count(chunk.chunk_id)::bigint AS chunk_count
 FROM knowledge_sources AS source
@@ -22,7 +24,7 @@ LEFT JOIN knowledge_chunks AS chunk
     AND chunk.source_id = source.source_id
 WHERE source.workspace_id = $1
   AND source.idempotency_key = $2
-GROUP BY source.source_id, source.payload_fingerprint
+GROUP BY source.source_id, source.title, source.source_url, source.payload_fingerprint
 `
 
 type GetKnowledgeSubmissionParams struct {
@@ -31,15 +33,23 @@ type GetKnowledgeSubmissionParams struct {
 }
 
 type GetKnowledgeSubmissionRow struct {
-	SourceID           string `db:"source_id" json:"source_id"`
-	PayloadFingerprint string `db:"payload_fingerprint" json:"payload_fingerprint"`
-	ChunkCount         int64  `db:"chunk_count" json:"chunk_count"`
+	SourceID           string         `db:"source_id" json:"source_id"`
+	Title              string         `db:"title" json:"title"`
+	SourceUrl          sql.NullString `db:"source_url" json:"source_url"`
+	PayloadFingerprint string         `db:"payload_fingerprint" json:"payload_fingerprint"`
+	ChunkCount         int64          `db:"chunk_count" json:"chunk_count"`
 }
 
 func (q *Queries) GetKnowledgeSubmission(ctx context.Context, arg GetKnowledgeSubmissionParams) (GetKnowledgeSubmissionRow, error) {
 	row := q.db.QueryRowContext(ctx, getKnowledgeSubmission, arg.WorkspaceID, arg.IdempotencyKey)
 	var i GetKnowledgeSubmissionRow
-	err := row.Scan(&i.SourceID, &i.PayloadFingerprint, &i.ChunkCount)
+	err := row.Scan(
+		&i.SourceID,
+		&i.Title,
+		&i.SourceUrl,
+		&i.PayloadFingerprint,
+		&i.ChunkCount,
+	)
 	return i, err
 }
 
@@ -83,6 +93,7 @@ INSERT INTO knowledge_sources (
     workspace_id,
     source_id,
     title,
+    source_url,
     idempotency_key,
     payload_fingerprint,
     created_at
@@ -92,34 +103,48 @@ INSERT INTO knowledge_sources (
     $3,
     $4,
     $5,
-    $6
+    $6,
+    $7
 )
-RETURNING workspace_id, source_id, title, idempotency_key, payload_fingerprint, created_at
+RETURNING workspace_id, source_id, title, source_url, idempotency_key, payload_fingerprint, created_at
 `
 
 type InsertKnowledgeSourceParams struct {
-	WorkspaceID        string    `db:"workspace_id" json:"workspace_id"`
-	SourceID           string    `db:"source_id" json:"source_id"`
-	Title              string    `db:"title" json:"title"`
-	IdempotencyKey     string    `db:"idempotency_key" json:"idempotency_key"`
-	PayloadFingerprint string    `db:"payload_fingerprint" json:"payload_fingerprint"`
-	CreatedAt          time.Time `db:"created_at" json:"created_at"`
+	WorkspaceID        string         `db:"workspace_id" json:"workspace_id"`
+	SourceID           string         `db:"source_id" json:"source_id"`
+	Title              string         `db:"title" json:"title"`
+	SourceUrl          sql.NullString `db:"source_url" json:"source_url"`
+	IdempotencyKey     string         `db:"idempotency_key" json:"idempotency_key"`
+	PayloadFingerprint string         `db:"payload_fingerprint" json:"payload_fingerprint"`
+	CreatedAt          time.Time      `db:"created_at" json:"created_at"`
 }
 
-func (q *Queries) InsertKnowledgeSource(ctx context.Context, arg InsertKnowledgeSourceParams) (KnowledgeSource, error) {
+type InsertKnowledgeSourceRow struct {
+	WorkspaceID        string         `db:"workspace_id" json:"workspace_id"`
+	SourceID           string         `db:"source_id" json:"source_id"`
+	Title              string         `db:"title" json:"title"`
+	SourceUrl          sql.NullString `db:"source_url" json:"source_url"`
+	IdempotencyKey     string         `db:"idempotency_key" json:"idempotency_key"`
+	PayloadFingerprint string         `db:"payload_fingerprint" json:"payload_fingerprint"`
+	CreatedAt          time.Time      `db:"created_at" json:"created_at"`
+}
+
+func (q *Queries) InsertKnowledgeSource(ctx context.Context, arg InsertKnowledgeSourceParams) (InsertKnowledgeSourceRow, error) {
 	row := q.db.QueryRowContext(ctx, insertKnowledgeSource,
 		arg.WorkspaceID,
 		arg.SourceID,
 		arg.Title,
+		arg.SourceUrl,
 		arg.IdempotencyKey,
 		arg.PayloadFingerprint,
 		arg.CreatedAt,
 	)
-	var i KnowledgeSource
+	var i InsertKnowledgeSourceRow
 	err := row.Scan(
 		&i.WorkspaceID,
 		&i.SourceID,
 		&i.Title,
+		&i.SourceUrl,
 		&i.IdempotencyKey,
 		&i.PayloadFingerprint,
 		&i.CreatedAt,

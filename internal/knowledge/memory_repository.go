@@ -63,7 +63,7 @@ func (r *MemoryRepository) SaveSource(
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if previous, found := r.submissions[workspaceID][idempotencyKey]; found {
-		if previous.PayloadFingerprint != payloadFingerprint {
+		if previous.PayloadFingerprint != payloadFingerprint || previous.SourceURL != source.SourceURL {
 			return SubmitTextResult{}, ErrIdempotencyConflict
 		}
 		return previous.Result, nil
@@ -86,6 +86,8 @@ func (r *MemoryRepository) SaveSource(
 	}
 	r.submissions[workspaceID][idempotencyKey] = SubmissionRecord{
 		Result:             result,
+		SourceTitle:        source.Title,
+		SourceURL:          source.SourceURL,
 		PayloadFingerprint: payloadFingerprint,
 	}
 	return result, nil

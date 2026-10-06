@@ -8,19 +8,21 @@ const (
 	defaultLogLevel   = "info"
 )
 
-// Settings contains configuration shared by the API and Worker. Validation and
-// secret loading are added in the dedicated Foundation configuration task.
+// Settings contains environment-backed configuration shared by the API and
+// Worker. Callers must not log secret-bearing values such as DatabaseURL.
 type Settings struct {
-	APIAddress string
-	LogLevel   string
+	APIAddress  string
+	LogLevel    string
+	DatabaseURL string
 }
 
 // Load reads the current process environment without retaining mutable global
 // state, so API and Worker lifecycles remain independent.
 func Load() Settings {
 	return Settings{
-		APIAddress: valueOrDefault("ARIAD_API_ADDR", defaultAPIAddress),
-		LogLevel:   valueOrDefault("ARIAD_LOG_LEVEL", defaultLogLevel),
+		APIAddress:  valueOrDefault("ARIAD_API_ADDR", defaultAPIAddress),
+		LogLevel:    valueOrDefault("ARIAD_LOG_LEVEL", defaultLogLevel),
+		DatabaseURL: os.Getenv("ARIAD_DATABASE_URL"),
 	}
 }
 

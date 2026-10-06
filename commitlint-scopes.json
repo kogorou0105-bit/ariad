@@ -1,0 +1,23 @@
+[
+  "agent",
+  "api",
+  "auth",
+  "console",
+  "contracts",
+  "conversation",
+  "db",
+  "deploy",
+  "deps",
+  "docs",
+  "evaluation",
+  "ingestion",
+  "knowledge",
+  "platform",
+  "repo",
+  "retrieval",
+  "runtime",
+  "security",
+  "tenant",
+  "widget",
+  "worker"
+]

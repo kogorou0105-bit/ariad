@@ -11,7 +11,10 @@ import (
 	"time"
 )
 
-const maximumChunkRunes = 800
+const (
+	maximumChunkRunes      = 800
+	embeddingBackfillLease = 5 * time.Minute
+)
 
 // ErrInvalidText indicates that a knowledge submission contains no usable text.
 var (
@@ -36,6 +39,11 @@ type Chunk struct {
 	SourceTitle string
 	Ordinal     int
 	Text        string
+	Embedding   []float64
+}
+
+type Embedder interface {
+	Embed(context.Context, string, string) ([]float64, error)
 }
 
 // SubmitTextCommand contains the tenant and retry context for a text submission.
@@ -80,6 +88,103 @@ type Repository interface {
 		chunks []Chunk,
 	) (SubmitTextResult, error)
 	ListChunks(ctx context.Context, workspaceID string) ([]Chunk, error)
+	SaveEmbedding(ctx context.Context, workspaceID, chunkID string, embedding []float64) error
+	GetEmbeddingBackfill(ctx context.Context, workspaceID string) (EmbeddingBackfillStatus, bool, error)
+	SaveEmbeddingBackfill(ctx context.Context, workspaceID string, status EmbeddingBackfillStatus) error
+}
+
+type EmbeddingFailure struct {
+	ChunkID string
+	Reason  string
+}
+
+type EmbeddingBackfillStatus struct {
+	Status    string
+	Total     int
+	Completed int
+	Failed    int
+	Failures  []EmbeddingFailure
+	Error     string
+	UpdatedAt time.Time
+}
+
+type BackfillResult struct {
+	Total     int
+	Completed int
+	Failed    int
+	Failures  []EmbeddingFailure
+}
+
+func (s *Service) BackfillEmbeddings(ctx context.Context, workspaceID string) (BackfillResult, error) {
+	status := EmbeddingBackfillStatus{Status: "running", UpdatedAt: s.clock().UTC()}
+	if err := s.repository.SaveEmbeddingBackfill(ctx, workspaceID, status); err != nil {
+		return BackfillResult{}, fmt.Errorf("save embedding backfill status: %w", err)
+	}
+	chunks, err := s.repository.ListChunks(ctx, workspaceID)
+	if err != nil {
+		s.failEmbeddingBackfill(ctx, workspaceID, status, err)
+		return BackfillResult{}, err
+	}
+	result := BackfillResult{Total: len(chunks)}
+	status.Total = result.Total
+	if s.embedder == nil {
+		err = errors.New("semantic retrieval is not configured")
+		s.failEmbeddingBackfill(ctx, workspaceID, status, err)
+		return result, err
+	}
+	for _, chunk := range chunks {
+		if len(chunk.Embedding) > 0 {
+			result.Completed++
+		} else {
+			vector, embedErr := s.embedder.Embed(ctx, workspaceID, chunk.Text)
+			if embedErr == nil && len(vector) == 0 {
+				embedErr = errors.New("embedding provider returned an empty vector")
+			}
+			if embedErr == nil {
+				embedErr = s.repository.SaveEmbedding(ctx, workspaceID, chunk.ID, vector)
+			}
+			if embedErr != nil {
+				result.Failed++
+				result.Failures = append(result.Failures, EmbeddingFailure{ChunkID: chunk.ID, Reason: embedErr.Error()})
+				s.reportEmbeddingError(workspaceID, chunk.ID, embedErr)
+			} else {
+				result.Completed++
+			}
+		}
+		status.Completed, status.Failed, status.Failures, status.UpdatedAt = result.Completed, result.Failed, append([]EmbeddingFailure(nil), result.Failures...), s.clock().UTC()
+		if err := s.repository.SaveEmbeddingBackfill(ctx, workspaceID, status); err != nil {
+			return result, fmt.Errorf("update embedding backfill status: %w", err)
+		}
+	}
+	status.Status, status.UpdatedAt = "completed", s.clock().UTC()
+	if err := s.repository.SaveEmbeddingBackfill(ctx, workspaceID, status); err != nil {
+		return result, fmt.Errorf("complete embedding backfill status: %w", err)
+	}
+	return result, nil
+}
+
+func (s *Service) StartEmbeddingBackfill(ctx context.Context, workspaceID string) (EmbeddingBackfillStatus, bool, error) {
+	current, found, err := s.repository.GetEmbeddingBackfill(ctx, workspaceID)
+	if err != nil {
+		return EmbeddingBackfillStatus{}, false, err
+	}
+	if found && current.Status == "running" && s.clock().UTC().Sub(current.UpdatedAt) < embeddingBackfillLease {
+		return current, false, nil
+	}
+	status := EmbeddingBackfillStatus{Status: "running", UpdatedAt: s.clock().UTC()}
+	if err := s.repository.SaveEmbeddingBackfill(ctx, workspaceID, status); err != nil {
+		return EmbeddingBackfillStatus{}, false, err
+	}
+	return status, true, nil
+}
+
+func (s *Service) GetEmbeddingBackfill(ctx context.Context, workspaceID string) (EmbeddingBackfillStatus, bool, error) {
+	return s.repository.GetEmbeddingBackfill(ctx, workspaceID)
+}
+
+func (s *Service) failEmbeddingBackfill(ctx context.Context, workspaceID string, status EmbeddingBackfillStatus, failure error) {
+	status.Status, status.Error, status.UpdatedAt = "failed", failure.Error(), s.clock().UTC()
+	_ = s.repository.SaveEmbeddingBackfill(ctx, workspaceID, status)
 }
 
 // ChunkReader exposes only the knowledge operation required by retrieval.
@@ -99,13 +204,29 @@ type Submitter interface {
 
 // Service accepts text and exposes immutable chunks.
 type Service struct {
-	repository Repository
-	clock      func() time.Time
+	repository       Repository
+	clock            func() time.Time
+	embedder         Embedder
+	onEmbeddingError func(workspaceID, chunkID string, err error)
+}
+
+type Option func(*Service)
+
+func WithEmbedder(embedder Embedder) Option {
+	return func(service *Service) { service.embedder = embedder }
+}
+
+func WithEmbeddingErrorHandler(handler func(workspaceID, chunkID string, err error)) Option {
+	return func(service *Service) { service.onEmbeddingError = handler }
 }
 
 // NewService creates a knowledge service.
-func NewService(repository Repository) *Service {
-	return &Service{repository: repository, clock: time.Now}
+func NewService(repository Repository, options ...Option) *Service {
+	service := &Service{repository: repository, clock: time.Now}
+	for _, option := range options {
+		option(service)
+	}
+	return service
 }
 
 // FindSubmission exposes an idempotency lookup without exposing persistence.
@@ -171,14 +292,22 @@ func (s *Service) SubmitText(
 		if chunkErr != nil {
 			return SubmitTextResult{}, chunkErr
 		}
-		chunks = append(chunks, Chunk{
+		chunk := Chunk{
 			ID:          chunkID,
 			WorkspaceID: command.WorkspaceID,
 			SourceID:    source.ID,
 			SourceTitle: source.Title,
 			Ordinal:     ordinal,
 			Text:        part,
-		})
+		}
+		if s.embedder != nil {
+			if vector, embeddingErr := s.embedder.Embed(ctx, command.WorkspaceID, part); embeddingErr == nil {
+				chunk.Embedding = vector
+			} else {
+				s.reportEmbeddingError(command.WorkspaceID, chunk.ID, embeddingErr)
+			}
+		}
+		chunks = append(chunks, chunk)
 	}
 
 	result, err := s.repository.SaveSource(
@@ -193,6 +322,12 @@ func (s *Service) SubmitText(
 		return SubmitTextResult{}, fmt.Errorf("save knowledge source: %w", err)
 	}
 	return result, nil
+}
+
+func (s *Service) reportEmbeddingError(workspaceID, chunkID string, err error) {
+	if err != nil && s.onEmbeddingError != nil {
+		s.onEmbeddingError(workspaceID, chunkID, err)
+	}
 }
 
 // ListChunks returns a copy of every chunk visible to the workspace.

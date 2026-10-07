@@ -217,6 +217,16 @@ func TestModelConfigManagementFlowValidationAndIsolation(t *testing.T) {
 	if crossWorkspace.Code != http.StatusForbidden {
 		t.Fatalf("cross-workspace status = %d", crossWorkspace.Code)
 	}
+	backfillPath := "/api/v1/knowledge/embeddings/backfill?workspace_id=" + url.QueryEscape(developmentWorkspaceID)
+	if response := getForTest(t, router, backfillPath); response.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized backfill status = %d", response.Code)
+	}
+	if response := adminRequestForTest(t, router, http.MethodGet, "/api/v1/knowledge/embeddings/backfill?workspace_id=ws_other", nil); response.Code != http.StatusForbidden {
+		t.Fatalf("cross-workspace backfill status = %d", response.Code)
+	}
+	if response := adminRequestForTest(t, router, http.MethodGet, backfillPath, nil); response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"status":"idle"`) {
+		t.Fatalf("initial backfill status = %d body = %s", response.Code, response.Body.String())
+	}
 
 	for _, test := range []struct {
 		name    string
@@ -226,6 +236,8 @@ func TestModelConfigManagementFlowValidationAndIsolation(t *testing.T) {
 		{name: "invalid URL", payload: map[string]string{"workspace_id": developmentWorkspaceID, "base_url": "://bad", "model": "m", "api_key": "secret"}, message: "base URL"},
 		{name: "missing model", payload: map[string]string{"workspace_id": developmentWorkspaceID, "base_url": "https://model.example", "api_key": "secret"}, message: "model name"},
 		{name: "missing first key", payload: map[string]string{"workspace_id": developmentWorkspaceID, "base_url": "https://model.example", "model": "m"}, message: "API key"},
+		{name: "invalid embedding URL", payload: map[string]string{"workspace_id": developmentWorkspaceID, "base_url": "https://model.example", "model": "m", "api_key": "secret", "embedding_base_url": "://bad", "embedding_model": "embed", "embedding_api_key": "embedding-secret"}, message: "base URL"},
+		{name: "missing first embedding key", payload: map[string]string{"workspace_id": developmentWorkspaceID, "base_url": "https://model.example", "model": "m", "api_key": "secret", "embedding_base_url": "https://embedding.example", "embedding_model": "embed"}, message: "API key"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			response := adminRequestForTest(t, router, http.MethodPut, path, test.payload)
@@ -235,12 +247,17 @@ func TestModelConfigManagementFlowValidationAndIsolation(t *testing.T) {
 		})
 	}
 	secret := "super-secret-workspace-key"
-	saved := adminRequestForTest(t, router, http.MethodPut, path, map[string]string{"workspace_id": developmentWorkspaceID, "base_url": "https://model.example/v1/", "model": "custom-model", "api_key": secret})
-	if saved.Code != http.StatusOK || strings.Contains(saved.Body.String(), secret) {
+	embeddingSecret := "super-secret-embedding-key"
+	saved := adminRequestForTest(t, router, http.MethodPut, path, map[string]any{"workspace_id": developmentWorkspaceID, "base_url": "https://model.example/v1/", "model": "custom-model", "api_key": secret, "embedding_base_url": "https://embedding.example/v1/", "embedding_model": "embed-model", "embedding_api_key": embeddingSecret, "embedding_threshold": 0.42})
+	if saved.Code != http.StatusOK || strings.Contains(saved.Body.String(), secret) || strings.Contains(saved.Body.String(), embeddingSecret) {
 		t.Fatalf("save status = %d, body leaked = %s", saved.Code, saved.Body.String())
 	}
-	updated := adminRequestForTest(t, router, http.MethodPut, path, map[string]string{"workspace_id": developmentWorkspaceID, "base_url": "https://new.example", "model": "new-model", "api_key": ""})
-	if updated.Code != http.StatusOK || strings.Contains(updated.Body.String(), secret) {
+	var configured modelConfigResponse
+	if err := json.Unmarshal(saved.Body.Bytes(), &configured); err != nil || !configured.SemanticEnabled || configured.EmbeddingModel != "embed-model" || configured.EmbeddingThreshold != 0.42 || configured.EmbeddingAPIKeyMask == "" {
+		t.Fatalf("configured = %#v err = %v", configured, err)
+	}
+	updated := adminRequestForTest(t, router, http.MethodPut, path, map[string]any{"workspace_id": developmentWorkspaceID, "base_url": "https://new.example", "model": "new-model", "api_key": "", "embedding_base_url": "https://embedding.example/v1", "embedding_model": "embed-model-v2", "embedding_api_key": "", "embedding_threshold": 0.5})
+	if updated.Code != http.StatusOK || strings.Contains(updated.Body.String(), secret) || strings.Contains(updated.Body.String(), embeddingSecret) {
 		t.Fatalf("update status = %d, body = %s", updated.Code, updated.Body.String())
 	}
 	reset := adminRequestForTest(t, router, http.MethodDelete, path, nil)
@@ -959,7 +976,7 @@ func getAdminForTest(t *testing.T, handler http.Handler, path string) *httptest.
 	return response
 }
 
-func adminRequestForTest(t *testing.T, handler http.Handler, method, path string, payload map[string]string) *httptest.ResponseRecorder {
+func adminRequestForTest(t *testing.T, handler http.Handler, method, path string, payload any) *httptest.ResponseRecorder {
 	t.Helper()
 	var body *bytes.Reader
 	if payload == nil {

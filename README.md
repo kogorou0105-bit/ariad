@@ -85,6 +85,7 @@ excludes frontend dependencies.
 | `ARIAD_LOG_LEVEL` | `info` | API and Worker log level |
 | `ARIAD_MODEL_CONFIG_ENCRYPTION_KEY` | unset | Base64-encoded 32-byte AES key required to persist workspace BYOK configuration |
 | `ARIAD_CONVERSATION_HISTORY_TURN_LIMIT` | `5` | Recent turns included in model context |
+| `ARIAD_EMBEDDING_MODEL` | unset | System-default OpenAI-compatible embedding model; when unset, retrieval uses lexical matching unless a workspace embedding model is configured in Console |
 
 On the first API startup after migrations, Ariad creates the `admin` account and
 prints its randomly generated initial password once in the startup log. Sign in
@@ -109,6 +110,26 @@ keeping already-rendered messages visible.
 
 Generate the workspace model-configuration encryption key with `openssl rand -base64 32`
 and keep it stable across API restarts. Losing or changing it makes persisted workspace API keys undecryptable.
+
+Apply database migration `000007_knowledge_embeddings.sql` to persist chunk vectors and the
+workspace embedding configuration. In Console, open **Model configuration** and provide an
+OpenAI-compatible embedding Base URL, model name, API key, and minimum similarity threshold.
+Saving takes effect immediately; clearing the embedding model disables semantic retrieval and
+keeps lexical retrieval active. API keys are encrypted with
+`ARIAD_MODEL_CONFIG_ENCRYPTION_KEY` and are returned only as masks.
+
+New knowledge is embedded during ingestion. For knowledge created before this migration, use
+**Backfill existing knowledge** on the same Console page. The job runs in the background and its
+running/completed state, counts, and per-chunk failure reasons are persisted and available from
+`GET /api/v1/knowledge/embeddings/backfill?workspace_id=...`; failed chunks are retried by starting
+the backfill again. Provider errors are reflected by the most recent embedding health status in
+Console and retrieval errors are logged while lexical matching remains available.
+
+As a system-default alternative, set `ARIAD_EMBEDDING_MODEL` together with
+`ARIAD_MODEL_BASE_URL` and `ARIAD_MODEL_API_KEY`. A local OpenAI-compatible provider works too;
+for example, Ollama can use a Base URL such as `http://localhost:11434/v1`, an installed embedding
+model such as `nomic-embed-text`, and any non-empty API-key placeholder. Ariad combines cosine
+similarity with lexical overlap and excludes semantic-only results below the configured threshold.
 
 ## Product constraints
 

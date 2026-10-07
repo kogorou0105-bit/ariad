@@ -3,9 +3,11 @@ package database
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
+	"time"
 
 	dbgen "ariad/db/generated"
 	"ariad/internal/knowledge"
@@ -92,6 +94,15 @@ func (r *KnowledgeRepository) SaveSource(
 		}); err != nil {
 			return knowledge.SubmitTextResult{}, fmt.Errorf("insert knowledge chunk: %w", err)
 		}
+		if len(chunk.Embedding) > 0 {
+			encoded, encodeErr := json.Marshal(chunk.Embedding)
+			if encodeErr != nil {
+				return knowledge.SubmitTextResult{}, encodeErr
+			}
+			if err := queries.UpsertKnowledgeChunkEmbedding(ctx, dbgen.UpsertKnowledgeChunkEmbeddingParams{WorkspaceID: workspaceID, ChunkID: chunk.ID, Embedding: string(encoded), UpdatedAt: time.Now().UTC()}); err != nil {
+				return knowledge.SubmitTextResult{}, fmt.Errorf("insert knowledge embedding: %w", err)
+			}
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return knowledge.SubmitTextResult{}, fmt.Errorf("commit knowledge transaction: %w", err)
@@ -114,16 +125,71 @@ func (r *KnowledgeRepository) ListChunks(
 	}
 	chunks := make([]knowledge.Chunk, 0, len(rows))
 	for _, row := range rows {
-		chunks = append(chunks, knowledge.Chunk{
+		chunk := knowledge.Chunk{
 			ID:          row.ChunkID,
 			WorkspaceID: row.WorkspaceID,
 			SourceID:    row.SourceID,
 			SourceTitle: row.SourceTitle,
 			Ordinal:     int(row.Ordinal),
 			Text:        row.Text,
-		})
+		}
+		if row.Embedding.Valid {
+			if err := json.Unmarshal([]byte(row.Embedding.String), &chunk.Embedding); err != nil {
+				return nil, fmt.Errorf("decode knowledge chunk embedding %s: %w", row.ChunkID, err)
+			}
+		}
+		chunks = append(chunks, chunk)
 	}
 	return chunks, nil
+}
+
+func (r *KnowledgeRepository) SaveEmbedding(ctx context.Context, workspaceID, chunkID string, embedding []float64) error {
+	encoded, err := json.Marshal(embedding)
+	if err != nil {
+		return err
+	}
+	return r.queries.UpsertKnowledgeChunkEmbedding(ctx, dbgen.UpsertKnowledgeChunkEmbeddingParams{WorkspaceID: workspaceID, ChunkID: chunkID, Embedding: string(encoded), UpdatedAt: time.Now().UTC()})
+}
+
+func (r *KnowledgeRepository) GetEmbeddingBackfill(ctx context.Context, workspaceID string) (knowledge.EmbeddingBackfillStatus, bool, error) {
+	row, err := r.queries.GetKnowledgeEmbeddingBackfill(ctx, workspaceID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return knowledge.EmbeddingBackfillStatus{}, false, nil
+	}
+	if err != nil {
+		return knowledge.EmbeddingBackfillStatus{}, false, fmt.Errorf("get knowledge embedding backfill: %w", err)
+	}
+	var failures []knowledge.EmbeddingFailure
+	if err := json.Unmarshal([]byte(row.Failures), &failures); err != nil {
+		return knowledge.EmbeddingBackfillStatus{}, false, fmt.Errorf("decode knowledge embedding backfill failures: %w", err)
+	}
+	return knowledge.EmbeddingBackfillStatus{
+		Status: row.Status, Total: int(row.Total), Completed: int(row.Completed), Failed: int(row.Failed),
+		Failures: failures, Error: row.Error.String, UpdatedAt: row.UpdatedAt,
+	}, true, nil
+}
+
+func (r *KnowledgeRepository) SaveEmbeddingBackfill(ctx context.Context, workspaceID string, status knowledge.EmbeddingBackfillStatus) error {
+	total, err := checkedInt32(status.Total)
+	if err != nil {
+		return err
+	}
+	completed, err := checkedInt32(status.Completed)
+	if err != nil {
+		return err
+	}
+	failed, err := checkedInt32(status.Failed)
+	if err != nil {
+		return err
+	}
+	failures, err := json.Marshal(status.Failures)
+	if err != nil {
+		return fmt.Errorf("encode knowledge embedding backfill failures: %w", err)
+	}
+	return r.queries.UpsertKnowledgeEmbeddingBackfill(ctx, dbgen.UpsertKnowledgeEmbeddingBackfillParams{
+		WorkspaceID: workspaceID, Status: status.Status, Total: total, Completed: completed, Failed: failed,
+		Failures: string(failures), Error: nullableString(status.Error), UpdatedAt: status.UpdatedAt,
+	})
 }
 
 func findKnowledgeSubmission(

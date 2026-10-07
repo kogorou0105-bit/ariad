@@ -91,6 +91,24 @@ type KnowledgeChunk struct {
 	Text        string `db:"text" json:"text"`
 }
 
+type KnowledgeChunkEmbedding struct {
+	WorkspaceID string    `db:"workspace_id" json:"workspace_id"`
+	ChunkID     string    `db:"chunk_id" json:"chunk_id"`
+	Embedding   string    `db:"embedding" json:"embedding"`
+	UpdatedAt   time.Time `db:"updated_at" json:"updated_at"`
+}
+
+type KnowledgeEmbeddingBackfill struct {
+	WorkspaceID string         `db:"workspace_id" json:"workspace_id"`
+	Status      string         `db:"status" json:"status"`
+	Total       int32          `db:"total" json:"total"`
+	Completed   int32          `db:"completed" json:"completed"`
+	Failed      int32          `db:"failed" json:"failed"`
+	Failures    string         `db:"failures" json:"failures"`
+	Error       sql.NullString `db:"error" json:"error"`
+	UpdatedAt   time.Time      `db:"updated_at" json:"updated_at"`
+}
+
 type KnowledgeSource struct {
 	WorkspaceID        string         `db:"workspace_id" json:"workspace_id"`
 	SourceID           string         `db:"source_id" json:"source_id"`
@@ -148,9 +166,13 @@ type VisitorSession struct {
 }
 
 type WorkspaceModelConfig struct {
-	WorkspaceID      string    `db:"workspace_id" json:"workspace_id"`
-	BaseUrl          string    `db:"base_url" json:"base_url"`
-	Model            string    `db:"model" json:"model"`
-	ApiKeyCiphertext string    `db:"api_key_ciphertext" json:"api_key_ciphertext"`
-	UpdatedAt        time.Time `db:"updated_at" json:"updated_at"`
+	WorkspaceID               string         `db:"workspace_id" json:"workspace_id"`
+	BaseUrl                   string         `db:"base_url" json:"base_url"`
+	Model                     string         `db:"model" json:"model"`
+	ApiKeyCiphertext          string         `db:"api_key_ciphertext" json:"api_key_ciphertext"`
+	UpdatedAt                 time.Time      `db:"updated_at" json:"updated_at"`
+	EmbeddingBaseUrl          sql.NullString `db:"embedding_base_url" json:"embedding_base_url"`
+	EmbeddingModel            sql.NullString `db:"embedding_model" json:"embedding_model"`
+	EmbeddingApiKeyCiphertext sql.NullString `db:"embedding_api_key_ciphertext" json:"embedding_api_key_ciphertext"`
+	EmbeddingThreshold        float64        `db:"embedding_threshold" json:"embedding_threshold"`
 }

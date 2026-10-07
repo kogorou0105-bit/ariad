@@ -37,7 +37,6 @@ export interface SubmitQuestionRequest {
   workspace_id: string;
   agent_id: string;
   conversation_id: string;
-  visitor_id: string;
   channel: "widget";
   locale: string;
   request_id: string;
@@ -87,7 +86,7 @@ export interface GetConversationHistoryResponse {
 }
 
 export interface HumanReply { reply_id: string; source: "human"; author_id: string; text: string; created_at: string; }
-export interface HandoffRequest { workspace_id: string; visitor_id: string; reason: string; }
+export interface HandoffRequest { workspace_id: string; reason: string; }
 export interface ReviewQueueItem { conversation_id: string; visitor_id: string; reason: string; requested_by: string; requested_at: string; last_activity_at: string; last_message_text: string; }
 export interface ListReviewsResponse { workspace_id: string; reviews: ReviewQueueItem[]; }
 export interface ReviewReplyRequest { workspace_id: string; visitor_id: string; text: string; }
@@ -102,14 +101,20 @@ export interface ConversationSummary {
   conversation_id: string;
   visitor_id: string;
   message_count: number;
+  started_at: string;
   last_activity_at: string;
   last_message_text: string;
+  status: "ongoing" | "pending" | "resolved" | "expired";
 }
 
 export interface ListConversationsResponse {
   workspace_id: string;
   conversations: ConversationSummary[];
 }
+
+export interface VisitorSessionResponse { token: string; refresh_token?: string; visitor_id: string; expires_at: string; }
+export interface VisitorProfile { visitor_id: string; first_seen_at: string; conversation_count: number; total_turn_count: number; last_activity_at: string; }
+export interface ListVisitorsResponse { workspace_id: string; visitors: VisitorProfile[]; }
 
 export type ModelConfigSource = "workspace" | "system_default" | "local";
 

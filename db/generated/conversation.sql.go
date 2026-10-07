@@ -494,27 +494,41 @@ func (q *Queries) ListConversationTurns(ctx context.Context, arg ListConversatio
 
 const listConversations = `-- name: ListConversations :many
 SELECT
-    conversation_id,
-    visitor_id,
+    m.conversation_id,
+    m.visitor_id,
     COUNT(*) AS message_count,
-    MAX(created_at)::timestamptz AS last_activity_at,
-    ((ARRAY_AGG(text ORDER BY created_at DESC, message_id DESC))[1])::text AS last_message_text
-FROM conversation_messages
-WHERE workspace_id = $1
-GROUP BY conversation_id, visitor_id
-ORDER BY last_activity_at DESC, conversation_id DESC
+    MIN(m.created_at)::timestamptz AS started_at,
+    MAX(m.created_at)::timestamptz AS last_activity_at,
+    ((ARRAY_AGG(m.text ORDER BY m.created_at DESC, m.message_id DESC))[1])::text AS last_message_text,
+    CASE
+      WHEN MAX(m.created_at) < now() - interval '30 days' AND COALESCE(MAX(s.status), 'ongoing') = 'ongoing' THEN 'expired'
+      ELSE COALESCE(MAX(s.status), 'ongoing')
+    END::text AS status
+FROM conversation_messages m
+LEFT JOIN conversation_states s USING (workspace_id, conversation_id, visitor_id)
+WHERE m.workspace_id = $1
+  AND ($2::text IS NULL OR m.visitor_id = $2)
+GROUP BY m.conversation_id, m.visitor_id
+ORDER BY last_activity_at DESC, m.conversation_id DESC
 `
+
+type ListConversationsParams struct {
+	WorkspaceID string         `db:"workspace_id" json:"workspace_id"`
+	VisitorID   sql.NullString `db:"visitor_id" json:"visitor_id"`
+}
 
 type ListConversationsRow struct {
 	ConversationID  string    `db:"conversation_id" json:"conversation_id"`
 	VisitorID       string    `db:"visitor_id" json:"visitor_id"`
 	MessageCount    int64     `db:"message_count" json:"message_count"`
+	StartedAt       time.Time `db:"started_at" json:"started_at"`
 	LastActivityAt  time.Time `db:"last_activity_at" json:"last_activity_at"`
 	LastMessageText string    `db:"last_message_text" json:"last_message_text"`
+	Status          string    `db:"status" json:"status"`
 }
 
-func (q *Queries) ListConversations(ctx context.Context, workspaceID string) ([]ListConversationsRow, error) {
-	rows, err := q.db.QueryContext(ctx, listConversations, workspaceID)
+func (q *Queries) ListConversations(ctx context.Context, arg ListConversationsParams) ([]ListConversationsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listConversations, arg.WorkspaceID, arg.VisitorID)
 	if err != nil {
 		return nil, err
 	}
@@ -526,8 +540,10 @@ func (q *Queries) ListConversations(ctx context.Context, workspaceID string) ([]
 			&i.ConversationID,
 			&i.VisitorID,
 			&i.MessageCount,
+			&i.StartedAt,
 			&i.LastActivityAt,
 			&i.LastMessageText,
+			&i.Status,
 		); err != nil {
 			return nil, err
 		}

@@ -51,15 +51,22 @@ SELECT EXISTS (
 
 -- name: ListConversations :many
 SELECT
-    conversation_id,
-    visitor_id,
+    m.conversation_id,
+    m.visitor_id,
     COUNT(*) AS message_count,
-    MAX(created_at)::timestamptz AS last_activity_at,
-    ((ARRAY_AGG(text ORDER BY created_at DESC, message_id DESC))[1])::text AS last_message_text
-FROM conversation_messages
-WHERE workspace_id = sqlc.arg(workspace_id)
-GROUP BY conversation_id, visitor_id
-ORDER BY last_activity_at DESC, conversation_id DESC;
+    MIN(m.created_at)::timestamptz AS started_at,
+    MAX(m.created_at)::timestamptz AS last_activity_at,
+    ((ARRAY_AGG(m.text ORDER BY m.created_at DESC, m.message_id DESC))[1])::text AS last_message_text,
+    CASE
+      WHEN MAX(m.created_at) < now() - interval '30 days' AND COALESCE(MAX(s.status), 'ongoing') = 'ongoing' THEN 'expired'
+      ELSE COALESCE(MAX(s.status), 'ongoing')
+    END::text AS status
+FROM conversation_messages m
+LEFT JOIN conversation_states s USING (workspace_id, conversation_id, visitor_id)
+WHERE m.workspace_id = sqlc.arg(workspace_id)
+  AND (sqlc.narg(visitor_id)::text IS NULL OR m.visitor_id = sqlc.narg(visitor_id))
+GROUP BY m.conversation_id, m.visitor_id
+ORDER BY last_activity_at DESC, m.conversation_id DESC;
 
 -- name: ListConversationTurns :many
 WITH selected_messages AS (

@@ -96,6 +96,17 @@ locked out, stop all API instances, back up the database, delete the rows from
 and capture its newly generated password. This is a destructive break-glass reset
 of administrator identities; it does not affect workspace or visitor data.
 
+The widget creates an anonymous visitor identity on first use. An unpredictable
+refresh credential preserves that identity in browser `localStorage`; short-lived
+Bearer sessions are renewed on activity for 30 days and safely reissued through
+the refresh credential after expiry. The current conversation ID is kept in
+`sessionStorage`, so reopening the widget starts a new conversation for the same
+anonymous visitor. Apply database
+migration `000006_visitor_sessions.sql` before deploying this version. Invalid or
+expired visitor credentials receive `visitor_session_invalid` or
+`visitor_session_expired`; the widget automatically obtains a new identity while
+keeping already-rendered messages visible.
+
 Generate the workspace model-configuration encryption key with `openssl rand -base64 32`
 and keep it stable across API restarts. Losing or changing it makes persisted workspace API keys undecryptable.
 

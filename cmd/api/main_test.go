@@ -25,6 +25,8 @@ type staticPageFetcher struct {
 	calls int
 }
 
+const testAdminToken = "test-admin-token"
+
 func (f *staticPageFetcher) Fetch(context.Context, string) (ingestion.FetchedPage, error) {
 	f.calls++
 	return f.page, f.err
@@ -41,11 +43,64 @@ func TestRouterHealth(t *testing.T) {
 	}
 }
 
+func TestManagementEndpointsRequireAdminToken(t *testing.T) {
+	t.Parallel()
+	router := newRouterWithAdminToken(testLogger(), platformmodel.NewStub(), testAdminToken)
+	path := "/api/v1/conversations?workspace_id=" + url.QueryEscape(developmentWorkspaceID)
+	for _, test := range []struct {
+		name   string
+		header string
+		status int
+	}{
+		{name: "missing", status: http.StatusUnauthorized},
+		{name: "wrong", header: "Bearer wrong", status: http.StatusUnauthorized},
+		{name: "valid", header: "Bearer " + testAdminToken, status: http.StatusOK},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, path, nil)
+			request.Header.Set("Authorization", test.header)
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			if response.Code != test.status {
+				t.Fatalf("status = %d, want %d; body = %s", response.Code, test.status, response.Body.String())
+			}
+		})
+	}
+
+	unconfigured := getForTest(t, newRouter(testLogger(), platformmodel.NewStub()), path)
+	if unconfigured.Code != http.StatusUnauthorized {
+		t.Fatalf("unconfigured status = %d, want %d", unconfigured.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestVisitorConversationEndpointsDoNotRequireAdminToken(t *testing.T) {
+	t.Parallel()
+	router := newRouterWithAdminToken(testLogger(), platformmodel.NewStub(), testAdminToken)
+	question := postJSONForTest(t, router, "/api/v1/questions", map[string]string{
+		"workspace_id": developmentWorkspaceID, "agent_id": developmentAgentID,
+		"visitor_id": "visitor_public", "channel": "widget", "locale": "en",
+		"request_id": "req_public", "idempotency_key": "ik_public",
+		"question": "Can I access this without an admin token?",
+	})
+	if question.Code != http.StatusOK {
+		t.Fatalf("question status = %d, body = %s", question.Code, question.Body.String())
+	}
+	var answered submitQuestionResponse
+	if err := json.Unmarshal(question.Body.Bytes(), &answered); err != nil {
+		t.Fatalf("decode answer: %v", err)
+	}
+	history := getForTest(t, router, "/api/v1/conversations/"+url.PathEscape(answered.ConversationID)+
+		"?workspace_id="+url.QueryEscape(developmentWorkspaceID)+"&visitor_id=visitor_public")
+	if history.Code != http.StatusOK {
+		t.Fatalf("history status = %d, body = %s", history.Code, history.Body.String())
+	}
+}
+
 func TestKnowledgeQuestionAnswerFlow(t *testing.T) {
 	t.Parallel()
-	router := newRouter(testLogger(), platformmodel.NewStub())
+	router := newRouterWithAdminToken(testLogger(), platformmodel.NewStub(), testAdminToken)
 
-	knowledgeResponse := postJSONForTest(t, router, "/api/v1/knowledge/text", map[string]string{
+	knowledgeResponse := postAdminJSONForTest(t, router, "/api/v1/knowledge/text", map[string]string{
 		"workspace_id":    developmentWorkspaceID,
 		"request_id":      "req_knowledge",
 		"idempotency_key": "ik_knowledge",
@@ -147,13 +202,14 @@ func TestURLIngestionQuestionAnswerFlowAndReplay(t *testing.T) {
 		`<html><head><title>Shipping guide</title></head><body>` +
 			`<script>ignore me</script><p>Express shipping arrives in two days.</p></body></html>`,
 	)}}
-	router := newRouterWithRepositories(
+	router := newRouterWithRepositoriesAndAdminToken(
 		testLogger(),
 		platformmodel.NewStub(),
 		knowledge.NewMemoryRepository(),
 		conversation.NewMemoryRepository(),
 		fetcher,
 		0,
+		testAdminToken,
 	)
 	payload := map[string]string{
 		"workspace_id":    developmentWorkspaceID,
@@ -162,11 +218,11 @@ func TestURLIngestionQuestionAnswerFlowAndReplay(t *testing.T) {
 		"request_id":      "req_url",
 		"idempotency_key": "ik_url",
 	}
-	first := postJSONForTest(t, router, "/api/v1/ingestion/url", payload)
+	first := postAdminJSONForTest(t, router, "/api/v1/ingestion/url", payload)
 	if first.Code != http.StatusCreated {
 		t.Fatalf("first ingestion status = %d, body = %s", first.Code, first.Body.String())
 	}
-	second := postJSONForTest(t, router, "/api/v1/ingestion/url", payload)
+	second := postAdminJSONForTest(t, router, "/api/v1/ingestion/url", payload)
 	if second.Code != http.StatusCreated {
 		t.Fatalf("replay ingestion status = %d, body = %s", second.Code, second.Body.String())
 	}
@@ -181,7 +237,7 @@ func TestURLIngestionQuestionAnswerFlowAndReplay(t *testing.T) {
 		t.Fatalf("ingestion results = %#v, %#v; fetch calls = %d", firstResult, secondResult, fetcher.calls)
 	}
 	payload["url"] = "https://example.com/different"
-	conflict := postJSONForTest(t, router, "/api/v1/ingestion/url", payload)
+	conflict := postAdminJSONForTest(t, router, "/api/v1/ingestion/url", payload)
 	if conflict.Code != http.StatusConflict {
 		t.Fatalf("conflict status = %d, want %d; body = %s", conflict.Code, http.StatusConflict, conflict.Body.String())
 	}
@@ -276,19 +332,20 @@ func TestURLIngestionReturnsMappedErrors(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			fetcher := &staticPageFetcher{page: test.page, err: test.fetchError}
-			router := newRouterWithRepositories(
+			router := newRouterWithRepositoriesAndAdminToken(
 				testLogger(),
 				platformmodel.NewStub(),
 				knowledge.NewMemoryRepository(),
 				conversation.NewMemoryRepository(),
 				fetcher,
 				0,
+				testAdminToken,
 			)
 			rawURL := test.rawURL
 			if rawURL == "" {
 				rawURL = "https://example.com/page"
 			}
-			response := postJSONForTest(t, router, "/api/v1/ingestion/url", map[string]string{
+			response := postAdminJSONForTest(t, router, "/api/v1/ingestion/url", map[string]string{
 				"workspace_id":    developmentWorkspaceID,
 				"url":             rawURL,
 				"request_id":      "req_error",
@@ -349,8 +406,8 @@ func TestConversationHistoryIsWorkspaceScopedAndEmptyConversationIsEmpty(t *test
 
 func TestConversationListIsWorkspaceScopedEmptyAndNewestFirst(t *testing.T) {
 	t.Parallel()
-	router := newRouter(testLogger(), platformmodel.NewStub())
-	empty := getForTest(t, router, "/api/v1/conversations?workspace_id="+url.QueryEscape(developmentWorkspaceID))
+	router := newRouterWithAdminToken(testLogger(), platformmodel.NewStub(), testAdminToken)
+	empty := getAdminForTest(t, router, "/api/v1/conversations?workspace_id="+url.QueryEscape(developmentWorkspaceID))
 	if empty.Code != http.StatusOK {
 		t.Fatalf("empty status = %d, body = %s", empty.Code, empty.Body.String())
 	}
@@ -375,14 +432,14 @@ func TestConversationListIsWorkspaceScopedEmptyAndNewestFirst(t *testing.T) {
 			t.Fatalf("question status = %d, body = %s", response.Code, response.Body.String())
 		}
 	}
-	response := getForTest(t, router, "/api/v1/conversations?workspace_id="+url.QueryEscape(developmentWorkspaceID))
+	response := getAdminForTest(t, router, "/api/v1/conversations?workspace_id="+url.QueryEscape(developmentWorkspaceID))
 	if err := json.Unmarshal(response.Body.Bytes(), &listed); err != nil {
 		t.Fatalf("decode list: %v", err)
 	}
 	if len(listed.Conversations) != 2 || listed.Conversations[0].VisitorID != "visitor_new" || listed.Conversations[1].VisitorID != "visitor_old" {
 		t.Fatalf("ordered conversations = %#v", listed.Conversations)
 	}
-	forbidden := getForTest(t, router, "/api/v1/conversations?workspace_id=ws_other")
+	forbidden := getAdminForTest(t, router, "/api/v1/conversations?workspace_id=ws_other")
 	if forbidden.Code != http.StatusForbidden {
 		t.Fatalf("other workspace status = %d, want %d", forbidden.Code, http.StatusForbidden)
 	}
@@ -423,7 +480,7 @@ func TestQuestionRefusesWithoutEvidence(t *testing.T) {
 
 func TestKnowledgeIdempotencyConflict(t *testing.T) {
 	t.Parallel()
-	router := newRouter(testLogger(), platformmodel.NewStub())
+	router := newRouterWithAdminToken(testLogger(), platformmodel.NewStub(), testAdminToken)
 	payload := map[string]string{
 		"workspace_id":    developmentWorkspaceID,
 		"request_id":      "req_one",
@@ -431,12 +488,12 @@ func TestKnowledgeIdempotencyConflict(t *testing.T) {
 		"title":           "Policy",
 		"text":            "Original text",
 	}
-	first := postJSONForTest(t, router, "/api/v1/knowledge/text", payload)
+	first := postAdminJSONForTest(t, router, "/api/v1/knowledge/text", payload)
 	if first.Code != http.StatusCreated {
 		t.Fatalf("first status = %d, body = %s", first.Code, first.Body.String())
 	}
 	payload["text"] = "Different text"
-	conflict := postJSONForTest(t, router, "/api/v1/knowledge/text", payload)
+	conflict := postAdminJSONForTest(t, router, "/api/v1/knowledge/text", payload)
 	if conflict.Code != http.StatusConflict {
 		t.Fatalf("conflict status = %d, body = %s", conflict.Code, conflict.Body.String())
 	}
@@ -468,9 +525,36 @@ func postJSONForTest(
 	return response
 }
 
+func postAdminJSONForTest(
+	t *testing.T,
+	handler http.Handler,
+	path string,
+	payload map[string]string,
+) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("encode request: %v", err)
+	}
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, path, bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer "+testAdminToken)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return response
+}
+
 func getForTest(t *testing.T, handler http.Handler, path string) *httptest.ResponseRecorder {
 	t.Helper()
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, path, nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return response
+}
+
+func getAdminForTest(t *testing.T, handler http.Handler, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, path, nil)
+	request.Header.Set("Authorization", "Bearer "+testAdminToken)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	return response

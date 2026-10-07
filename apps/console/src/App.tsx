@@ -5,14 +5,27 @@ import type {
 } from "@ariad/contracts";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, Outlet, useParams, useSearch } from "@tanstack/react-router";
+import { type FormEvent, useEffect, useState } from "react";
 
 import type { AppSurface } from "@ariad/contracts";
 
 const surface: AppSurface = "console";
 const workspaceID = "ws_dev";
+const adminTokenStorageKey = "ariad:admin_token";
+const adminUnauthorizedEvent = "ariad:admin-unauthorized";
 
-async function getJSON<Response>(path: string): Promise<Response> {
-  const response = await fetch(path);
+async function requestJSON<Response>(
+  path: string,
+  token: string | null,
+  clearTokenOnUnauthorized: boolean,
+): Promise<Response> {
+  const response = await fetch(path, {
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+  });
+  if (response.status === 401 && clearTokenOnUnauthorized) {
+    sessionStorage.removeItem(adminTokenStorageKey);
+    window.dispatchEvent(new Event(adminUnauthorizedEvent));
+  }
   const responseText = await response.text();
   let payload: unknown;
   try {
@@ -27,11 +40,39 @@ async function getJSON<Response>(path: string): Promise<Response> {
   return payload as Response;
 }
 
+function getJSON<Response>(path: string): Promise<Response> {
+  return requestJSON(path, sessionStorage.getItem(adminTokenStorageKey), true);
+}
+
 function formatActivity(value: string): string {
   return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
 }
 
 export function ConsoleShell() {
+  const queryClient = useQueryClient();
+  const [authenticated, setAuthenticated] = useState(
+    () => sessionStorage.getItem(adminTokenStorageKey) !== null,
+  );
+
+  useEffect(() => {
+    const handleUnauthorized = () => {
+      queryClient.clear();
+      setAuthenticated(false);
+    };
+    window.addEventListener(adminUnauthorizedEvent, handleUnauthorized);
+    return () => window.removeEventListener(adminUnauthorizedEvent, handleUnauthorized);
+  }, [queryClient]);
+
+  if (!authenticated) {
+    return <AdminLoginPage onLogin={() => setAuthenticated(true)} />;
+  }
+
+  function logout() {
+    sessionStorage.removeItem(adminTokenStorageKey);
+    queryClient.clear();
+    setAuthenticated(false);
+  }
+
   return (
     <div className="console-shell">
       <aside className="sidebar">
@@ -47,11 +88,63 @@ export function ConsoleShell() {
           <Link className="nav-item" activeProps={{ className: "nav-item nav-item-active" }} to="/conversations">Conversations</Link>
           <span className="nav-item nav-item-disabled">Evaluations</span>
         </nav>
+        <button className="logout-button" type="button" onClick={logout}>Log out</button>
       </aside>
       <main className="main-content" data-surface={surface}>
         <Outlet />
       </main>
     </div>
+  );
+}
+
+function AdminLoginPage({ onLogin }: { onLogin: () => void }) {
+  const [token, setToken] = useState("");
+  const [error, setError] = useState("");
+  const [pending, setPending] = useState(false);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const trimmed = token.trim();
+    if (!trimmed) return;
+    setError("");
+    setPending(true);
+    try {
+      await requestJSON<ListConversationsResponse>(
+        `/api/v1/conversations?workspace_id=${encodeURIComponent(workspaceID)}`,
+        trimmed,
+        false,
+      );
+      sessionStorage.setItem(adminTokenStorageKey, trimmed);
+      onLogin();
+    } catch (loginError) {
+      setError(loginError instanceof Error ? loginError.message : "Could not sign in.");
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <main className="login-page" data-surface={surface}>
+      <form className="login-card" onSubmit={(event) => void submit(event)}>
+        <span className="brand-mark">A</span>
+        <div className="eyebrow">Ariad Console</div>
+        <h1>Administrator access</h1>
+        <p>Enter the management token configured for this Ariad server.</p>
+        <label htmlFor="admin-token">Management token</label>
+        <input
+          id="admin-token"
+          type="password"
+          autoComplete="current-password"
+          autoFocus
+          value={token}
+          onChange={(event) => setToken(event.target.value)}
+        />
+        {error && <p className="login-error" role="alert">{error}</p>}
+        <button type="submit" disabled={pending || !token.trim()}>
+          {pending ? "Checking…" : "Continue"}
+        </button>
+      </form>
+    </main>
   );
 }
 

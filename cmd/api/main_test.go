@@ -27,7 +27,7 @@ type staticPageFetcher struct {
 	calls int
 }
 
-const testAdminToken = "test-admin-token"
+const testAdminPassword = "test-admin-token"
 
 func (f *staticPageFetcher) Fetch(context.Context, string) (ingestion.FetchedPage, error) {
 	f.calls++
@@ -45,10 +45,11 @@ func TestRouterHealth(t *testing.T) {
 	}
 }
 
-func TestManagementEndpointsRequireAdminToken(t *testing.T) {
+func TestManagementEndpointsRequireAdministratorSession(t *testing.T) {
 	t.Parallel()
-	router := newRouterWithAdminToken(testLogger(), platformmodel.NewStub(), testAdminToken)
+	router := newRouterWithBootstrapPassword(testLogger(), platformmodel.NewStub(), testAdminPassword)
 	path := "/api/v1/conversations?workspace_id=" + url.QueryEscape(developmentWorkspaceID)
+	validSession := adminSessionForTest(t, router)
 	for _, test := range []struct {
 		name   string
 		header string
@@ -56,7 +57,7 @@ func TestManagementEndpointsRequireAdminToken(t *testing.T) {
 	}{
 		{name: "missing", status: http.StatusUnauthorized},
 		{name: "wrong", header: "Bearer wrong", status: http.StatusUnauthorized},
-		{name: "valid", header: "Bearer " + testAdminToken, status: http.StatusOK},
+		{name: "valid", header: "Bearer " + validSession, status: http.StatusOK},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, path, nil)
@@ -66,18 +67,53 @@ func TestManagementEndpointsRequireAdminToken(t *testing.T) {
 			if response.Code != test.status {
 				t.Fatalf("status = %d, want %d; body = %s", response.Code, test.status, response.Body.String())
 			}
+			if test.status == http.StatusUnauthorized && !strings.Contains(response.Body.String(), `"request_id":`) {
+				t.Fatalf("401 missing request_id: %s", response.Body.String())
+			}
 		})
 	}
 
-	unconfigured := getForTest(t, newRouter(testLogger(), platformmodel.NewStub()), path)
-	if unconfigured.Code != http.StatusUnauthorized {
-		t.Fatalf("unconfigured status = %d, want %d", unconfigured.Code, http.StatusUnauthorized)
+}
+
+func TestAdministratorLoginCreateAndLogout(t *testing.T) {
+	t.Parallel()
+	router := newRouterWithBootstrapPassword(testLogger(), platformmodel.NewStub(), testAdminPassword)
+	failed := postJSONForTest(t, router, "/api/v1/admin/login", map[string]string{"username": "admin", "password": "wrong"})
+	if failed.Code != http.StatusUnauthorized {
+		t.Fatalf("failed login status = %d", failed.Code)
+	}
+	adminSession := adminSessionForTest(t, router)
+	created := requestWithSessionForTest(t, router, http.MethodPost, "/api/v1/admin/accounts", adminSession, map[string]string{"username": "operator", "password": "operator-password"})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create status = %d body = %s", created.Code, created.Body.String())
+	}
+	missing := requestWithSessionForTest(t, router, http.MethodDelete, "/api/v1/admin/accounts/missing", adminSession, nil)
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("delete missing status = %d body = %s", missing.Code, missing.Body.String())
+	}
+	login := postJSONForTest(t, router, "/api/v1/admin/login", map[string]string{"username": "operator", "password": "operator-password"})
+	if login.Code != http.StatusOK {
+		t.Fatalf("operator login status = %d body = %s", login.Code, login.Body.String())
+	}
+	var session loginResponse
+	if err := json.Unmarshal(login.Body.Bytes(), &session); err != nil {
+		t.Fatal(err)
+	}
+	path := "/api/v1/conversations?workspace_id=" + developmentWorkspaceID
+	if response := requestWithSessionForTest(t, router, http.MethodGet, path, session.Token, nil); response.Code != http.StatusOK {
+		t.Fatalf("authenticated status = %d", response.Code)
+	}
+	if response := requestWithSessionForTest(t, router, http.MethodPost, "/api/v1/admin/logout", session.Token, nil); response.Code != http.StatusOK {
+		t.Fatalf("logout status = %d", response.Code)
+	}
+	if response := requestWithSessionForTest(t, router, http.MethodGet, path, session.Token, nil); response.Code != http.StatusUnauthorized {
+		t.Fatalf("revoked status = %d", response.Code)
 	}
 }
 
 func TestHumanHandoffReviewReplyAndResolveFlow(t *testing.T) {
 	t.Parallel()
-	router := newRouterWithAdminToken(testLogger(), platformmodel.NewStub(), testAdminToken)
+	router := newRouterWithBootstrapPassword(testLogger(), platformmodel.NewStub(), testAdminPassword)
 	question := postJSONForTest(t, router, "/api/v1/questions", map[string]string{
 		"workspace_id": developmentWorkspaceID, "agent_id": developmentAgentID, "visitor_id": "visitor_review",
 		"channel": "widget", "locale": "en", "request_id": "req_review", "idempotency_key": "ik_review", "question": "I need help",
@@ -117,8 +153,18 @@ func TestHumanHandoffReviewReplyAndResolveFlow(t *testing.T) {
 	if crossWorkspaceReply.Code != http.StatusForbidden {
 		t.Fatalf("cross workspace reply status = %d", crossWorkspaceReply.Code)
 	}
-	reply := postAdminJSONForTest(t, router, "/api/v1/reviews/"+answered.ConversationID+"/replies", map[string]string{"workspace_id": developmentWorkspaceID, "visitor_id": "visitor_review", "text": "A person is here."})
-	if reply.Code != http.StatusCreated || !strings.Contains(reply.Body.String(), `"source":"human"`) {
+	adminSession := adminSessionForTest(t, router)
+	created := requestWithSessionForTest(t, router, http.MethodPost, "/api/v1/admin/accounts", adminSession, map[string]string{"username": "reviewer", "password": "reviewer-password"})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create reviewer status = %d body = %s", created.Code, created.Body.String())
+	}
+	reviewerLogin := postJSONForTest(t, router, "/api/v1/admin/login", map[string]string{"username": "reviewer", "password": "reviewer-password"})
+	var reviewerSession loginResponse
+	if err := json.Unmarshal(reviewerLogin.Body.Bytes(), &reviewerSession); err != nil {
+		t.Fatal(err)
+	}
+	reply := requestWithSessionForTest(t, router, http.MethodPost, "/api/v1/reviews/"+answered.ConversationID+"/replies", reviewerSession.Token, map[string]string{"workspace_id": developmentWorkspaceID, "visitor_id": "visitor_review", "text": "A person is here."})
+	if reply.Code != http.StatusCreated || !strings.Contains(reply.Body.String(), `"source":"human"`) || !strings.Contains(reply.Body.String(), `"author_id":"`+reviewerSession.Administrator.AdministratorID+`"`) {
 		t.Fatalf("reply status = %d body = %s", reply.Code, reply.Body.String())
 	}
 	emptyReply := postAdminJSONForTest(t, router, "/api/v1/reviews/"+answered.ConversationID+"/replies", map[string]string{"workspace_id": developmentWorkspaceID, "visitor_id": "visitor_review", "text": "   "})
@@ -156,7 +202,7 @@ func TestHumanHandoffReviewReplyAndResolveFlow(t *testing.T) {
 
 func TestModelConfigManagementFlowValidationAndIsolation(t *testing.T) {
 	t.Parallel()
-	router := newRouterWithAdminToken(testLogger(), platformmodel.NewStub(), testAdminToken)
+	router := newRouterWithBootstrapPassword(testLogger(), platformmodel.NewStub(), testAdminPassword)
 	path := "/api/v1/model-config?workspace_id=" + url.QueryEscape(developmentWorkspaceID)
 	unauthorized := getForTest(t, router, path)
 	if unauthorized.Code != http.StatusUnauthorized {
@@ -244,7 +290,7 @@ func TestSavedModelConfigImmediatelyDrivesVisitorAnswersAndResetRestoresFallback
 	configs := modelconfig.NewMemoryRepository()
 	router := newRouterWithRepositoriesAndModelConfig(
 		testLogger(), platformmodel.NewStub(), knowledge.NewMemoryRepository(), conversation.NewMemoryRepository(),
-		platformfetch.NewHTTPFetcher(), 0, testAdminToken, configs, modelconfig.Config{Model: "grounded-v1"},
+		platformfetch.NewHTTPFetcher(), 0, testAdminPassword, configs, modelconfig.Config{Model: "grounded-v1"},
 	)
 	configPath := "/api/v1/model-config?workspace_id=" + url.QueryEscape(developmentWorkspaceID)
 	saved := adminRequestForTest(t, router, http.MethodPut, configPath, map[string]string{
@@ -277,9 +323,9 @@ func TestSavedModelConfigImmediatelyDrivesVisitorAnswersAndResetRestoresFallback
 	}
 }
 
-func TestVisitorConversationEndpointsDoNotRequireAdminToken(t *testing.T) {
+func TestVisitorConversationEndpointsDoNotRequireAdministratorSession(t *testing.T) {
 	t.Parallel()
-	router := newRouterWithAdminToken(testLogger(), platformmodel.NewStub(), testAdminToken)
+	router := newRouterWithBootstrapPassword(testLogger(), platformmodel.NewStub(), testAdminPassword)
 	question := postJSONForTest(t, router, "/api/v1/questions", map[string]string{
 		"workspace_id": developmentWorkspaceID, "agent_id": developmentAgentID,
 		"visitor_id": "visitor_public", "channel": "widget", "locale": "en",
@@ -302,7 +348,7 @@ func TestVisitorConversationEndpointsDoNotRequireAdminToken(t *testing.T) {
 
 func TestKnowledgeQuestionAnswerFlow(t *testing.T) {
 	t.Parallel()
-	router := newRouterWithAdminToken(testLogger(), platformmodel.NewStub(), testAdminToken)
+	router := newRouterWithBootstrapPassword(testLogger(), platformmodel.NewStub(), testAdminPassword)
 
 	knowledgeResponse := postAdminJSONForTest(t, router, "/api/v1/knowledge/text", map[string]string{
 		"workspace_id":    developmentWorkspaceID,
@@ -406,14 +452,14 @@ func TestURLIngestionQuestionAnswerFlowAndReplay(t *testing.T) {
 		`<html><head><title>Shipping guide</title></head><body>` +
 			`<script>ignore me</script><p>Express shipping arrives in two days.</p></body></html>`,
 	)}}
-	router := newRouterWithRepositoriesAndAdminToken(
+	router := newRouterWithRepositoriesAndBootstrapPassword(
 		testLogger(),
 		platformmodel.NewStub(),
 		knowledge.NewMemoryRepository(),
 		conversation.NewMemoryRepository(),
 		fetcher,
 		0,
-		testAdminToken,
+		testAdminPassword,
 	)
 	payload := map[string]string{
 		"workspace_id":    developmentWorkspaceID,
@@ -536,14 +582,14 @@ func TestURLIngestionReturnsMappedErrors(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			fetcher := &staticPageFetcher{page: test.page, err: test.fetchError}
-			router := newRouterWithRepositoriesAndAdminToken(
+			router := newRouterWithRepositoriesAndBootstrapPassword(
 				testLogger(),
 				platformmodel.NewStub(),
 				knowledge.NewMemoryRepository(),
 				conversation.NewMemoryRepository(),
 				fetcher,
 				0,
-				testAdminToken,
+				testAdminPassword,
 			)
 			rawURL := test.rawURL
 			if rawURL == "" {
@@ -610,7 +656,7 @@ func TestConversationHistoryIsWorkspaceScopedAndEmptyConversationIsEmpty(t *test
 
 func TestConversationListIsWorkspaceScopedEmptyAndNewestFirst(t *testing.T) {
 	t.Parallel()
-	router := newRouterWithAdminToken(testLogger(), platformmodel.NewStub(), testAdminToken)
+	router := newRouterWithBootstrapPassword(testLogger(), platformmodel.NewStub(), testAdminPassword)
 	empty := getAdminForTest(t, router, "/api/v1/conversations?workspace_id="+url.QueryEscape(developmentWorkspaceID))
 	if empty.Code != http.StatusOK {
 		t.Fatalf("empty status = %d, body = %s", empty.Code, empty.Body.String())
@@ -684,7 +730,7 @@ func TestQuestionRefusesWithoutEvidence(t *testing.T) {
 
 func TestKnowledgeIdempotencyConflict(t *testing.T) {
 	t.Parallel()
-	router := newRouterWithAdminToken(testLogger(), platformmodel.NewStub(), testAdminToken)
+	router := newRouterWithBootstrapPassword(testLogger(), platformmodel.NewStub(), testAdminPassword)
 	payload := map[string]string{
 		"workspace_id":    developmentWorkspaceID,
 		"request_id":      "req_one",
@@ -741,7 +787,7 @@ func postAdminJSONForTest(
 		t.Fatalf("encode request: %v", err)
 	}
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, path, bytes.NewReader(body))
-	request.Header.Set("Authorization", "Bearer "+testAdminToken)
+	request.Header.Set("Authorization", "Bearer "+adminSessionForTest(t, handler))
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	return response
@@ -758,7 +804,7 @@ func getForTest(t *testing.T, handler http.Handler, path string) *httptest.Respo
 func getAdminForTest(t *testing.T, handler http.Handler, path string) *httptest.ResponseRecorder {
 	t.Helper()
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, path, nil)
-	request.Header.Set("Authorization", "Bearer "+testAdminToken)
+	request.Header.Set("Authorization", "Bearer "+adminSessionForTest(t, handler))
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	return response
@@ -777,7 +823,40 @@ func adminRequestForTest(t *testing.T, handler http.Handler, method, path string
 		body = bytes.NewReader(encoded)
 	}
 	request := httptest.NewRequestWithContext(context.Background(), method, path, body)
-	request.Header.Set("Authorization", "Bearer "+testAdminToken)
+	request.Header.Set("Authorization", "Bearer "+adminSessionForTest(t, handler))
+	if payload != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return response
+}
+
+func adminSessionForTest(t *testing.T, handler http.Handler) string {
+	t.Helper()
+	response := postJSONForTest(t, handler, "/api/v1/admin/login", map[string]string{"username": "admin", "password": testAdminPassword})
+	if response.Code != http.StatusOK {
+		t.Fatalf("login status = %d body = %s", response.Code, response.Body.String())
+	}
+	var login loginResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &login); err != nil {
+		t.Fatalf("decode login: %v", err)
+	}
+	return login.Token
+}
+
+func requestWithSessionForTest(t *testing.T, handler http.Handler, method, path, token string, payload map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
+	var body []byte
+	if payload != nil {
+		var err error
+		body, err = json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	request := httptest.NewRequestWithContext(context.Background(), method, path, bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer "+token)
 	if payload != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}

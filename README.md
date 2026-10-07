@@ -83,9 +83,18 @@ excludes frontend dependencies.
 | --- | --- | --- |
 | `ARIAD_API_ADDR` | `:8080` | Go API listen address |
 | `ARIAD_LOG_LEVEL` | `info` | API and Worker log level |
-| `ARIAD_ADMIN_TOKEN` | unset | Whitespace-free Bearer token for management endpoints; unset rejects all management requests |
 | `ARIAD_MODEL_CONFIG_ENCRYPTION_KEY` | unset | Base64-encoded 32-byte AES key required to persist workspace BYOK configuration |
 | `ARIAD_CONVERSATION_HISTORY_TURN_LIMIT` | `5` | Recent turns included in model context |
+
+On the first API startup after migrations, Ariad creates the `admin` account and
+prints its randomly generated initial password once in the startup log. Sign in
+through the Console and create a separate administrator account for each operator.
+In a multi-instance deployment, collect startup logs centrally: only the instance
+that wins first-account creation prints the password. If every administrator is
+locked out, stop all API instances, back up the database, delete the rows from
+`administrator_sessions` and `administrators`, then start exactly one API instance
+and capture its newly generated password. This is a destructive break-glass reset
+of administrator identities; it does not affect workspace or visitor data.
 
 Generate the workspace model-configuration encryption key with `openssl rand -base64 32`
 and keep it stable across API restarts. Losing or changing it makes persisted workspace API keys undecryptable.

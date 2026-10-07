@@ -18,7 +18,6 @@ type Settings struct {
 	APIAddress                   string
 	LogLevel                     string
 	DatabaseURL                  string
-	AdminToken                   string
 	ModelConfigEncryptionKey     string
 	ConversationHistoryTurnLimit int
 }
@@ -30,7 +29,6 @@ func Load() Settings {
 		APIAddress:               valueOrDefault("ARIAD_API_ADDR", defaultAPIAddress),
 		LogLevel:                 valueOrDefault("ARIAD_LOG_LEVEL", defaultLogLevel),
 		DatabaseURL:              os.Getenv("ARIAD_DATABASE_URL"),
-		AdminToken:               os.Getenv("ARIAD_ADMIN_TOKEN"),
 		ModelConfigEncryptionKey: os.Getenv("ARIAD_MODEL_CONFIG_ENCRYPTION_KEY"),
 		ConversationHistoryTurnLimit: positiveIntOrDefault(
 			"ARIAD_CONVERSATION_HISTORY_TURN_LIMIT",

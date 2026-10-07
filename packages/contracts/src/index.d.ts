@@ -92,6 +92,11 @@ export interface ReviewQueueItem { conversation_id: string; visitor_id: string; 
 export interface ListReviewsResponse { workspace_id: string; reviews: ReviewQueueItem[]; }
 export interface ReviewReplyRequest { workspace_id: string; visitor_id: string; text: string; }
 export interface ResolveReviewRequest { workspace_id: string; visitor_id: string; }
+export interface AdministratorCredentialsRequest { username: string; password: string; }
+export interface AdministratorSummary { administrator_id: string; username: string; }
+export interface AdministratorLoginResponse { token: string; expires_at: string; administrator: AdministratorSummary; }
+export interface ListAdministratorsResponse { administrators: AdministratorSummary[]; }
+export interface ChangeAdministratorPasswordRequest { current_password: string; new_password: string; }
 
 export interface ConversationSummary {
   conversation_id: string;

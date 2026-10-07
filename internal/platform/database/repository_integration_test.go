@@ -357,6 +357,7 @@ func testWorkspaceIsolation(
 		ID:          "src_isolation",
 		WorkspaceID: "ws_isolation_a",
 		Title:       "Isolation source",
+		Status:      "ready",
 		CreatedAt:   time.Now().UTC(),
 	}
 	chunks := []knowledge.Chunk{{
@@ -441,6 +442,7 @@ func testIdempotentReplay(
 		WorkspaceID: "ws_replay",
 		Title:       "Replay source",
 		SourceURL:   "https://example.com/replay",
+		Status:      "ready",
 		CreatedAt:   time.Now().UTC(),
 	}
 	chunks := []knowledge.Chunk{{

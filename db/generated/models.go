@@ -33,6 +33,16 @@ type ConversationCitation struct {
 	Ordinal     int32  `db:"ordinal" json:"ordinal"`
 }
 
+type ConversationHumanReply struct {
+	WorkspaceID    string    `db:"workspace_id" json:"workspace_id"`
+	ReplyID        string    `db:"reply_id" json:"reply_id"`
+	ConversationID string    `db:"conversation_id" json:"conversation_id"`
+	VisitorID      string    `db:"visitor_id" json:"visitor_id"`
+	AuthorID       string    `db:"author_id" json:"author_id"`
+	Text           string    `db:"text" json:"text"`
+	CreatedAt      time.Time `db:"created_at" json:"created_at"`
+}
+
 type ConversationMessage struct {
 	WorkspaceID        string    `db:"workspace_id" json:"workspace_id"`
 	MessageID          string    `db:"message_id" json:"message_id"`
@@ -44,6 +54,19 @@ type ConversationMessage struct {
 	IdempotencyKey     string    `db:"idempotency_key" json:"idempotency_key"`
 	PayloadFingerprint string    `db:"payload_fingerprint" json:"payload_fingerprint"`
 	CreatedAt          time.Time `db:"created_at" json:"created_at"`
+}
+
+type ConversationState struct {
+	WorkspaceID        string       `db:"workspace_id" json:"workspace_id"`
+	ConversationID     string       `db:"conversation_id" json:"conversation_id"`
+	VisitorID          string       `db:"visitor_id" json:"visitor_id"`
+	Status             string       `db:"status" json:"status"`
+	HandoffReason      string       `db:"handoff_reason" json:"handoff_reason"`
+	HandoffRequestedBy string       `db:"handoff_requested_by" json:"handoff_requested_by"`
+	HandoffRequestedAt sql.NullTime `db:"handoff_requested_at" json:"handoff_requested_at"`
+	ResolvedBy         string       `db:"resolved_by" json:"resolved_by"`
+	ResolvedAt         sql.NullTime `db:"resolved_at" json:"resolved_at"`
+	UpdatedAt          time.Time    `db:"updated_at" json:"updated_at"`
 }
 
 type KnowledgeChunk struct {

@@ -218,6 +218,12 @@ func (r *ConversationRepository) SaveTurn(
 	if err := insertConversationState(ctx, queries, workspaceID, idempotencyKey, payloadFingerprint, turn); err != nil {
 		return conversation.Turn{}, err
 	}
+	if err := queries.EnsureConversationState(ctx, dbgen.EnsureConversationStateParams{
+		WorkspaceID: workspaceID, ConversationID: turn.Message.ConversationID,
+		VisitorID: turn.Message.VisitorID, UpdatedAt: turn.Message.CreatedAt,
+	}); err != nil {
+		return conversation.Turn{}, fmt.Errorf("ensure conversation state: %w", err)
+	}
 	if err := queries.InsertUsageFact(ctx, usageParams(usageFact)); err != nil {
 		return conversation.Turn{}, fmt.Errorf("insert usage fact: %w", err)
 	}

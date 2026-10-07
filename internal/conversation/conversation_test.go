@@ -37,6 +37,54 @@ type recordingRepository struct {
 	facts []usage.Fact
 }
 
+type recordingHandoffs struct {
+	calls int
+	event StateEvent
+	err   error
+}
+
+func (r *recordingHandoffs) RecordConversationTurn(_ context.Context, event StateEvent) error {
+	r.calls++
+	r.event = event
+	return r.err
+}
+
+func TestHandoffDispositionAutomaticallyMarksConversationPending(t *testing.T) {
+	t.Parallel()
+	handoffs := &recordingHandoffs{}
+	service := NewService(NewMemoryRepository(), fixedAnswerer{result: runtime.Result{TerminalDisposition: runtime.DispositionHandoff, Text: "A human will help."}}, WithStateRecorder(handoffs))
+	command := SubmitQuestionCommand{WorkspaceID: "ws", AgentID: "agent", VisitorID: "visitor", Channel: ChannelWidget, RequestID: "req", IdempotencyKey: "ik", Question: "help"}
+	if _, err := service.SubmitQuestion(context.Background(), command); err != nil {
+		t.Fatal(err)
+	}
+	if handoffs.calls != 1 || handoffs.event.Disposition != runtime.DispositionHandoff || handoffs.event.VisitorID != "visitor" {
+		t.Fatalf("handoff = %#v", handoffs)
+	}
+	if _, err := service.SubmitQuestion(context.Background(), command); err != nil {
+		t.Fatal(err)
+	}
+	if handoffs.calls != 2 {
+		t.Fatalf("replay should retry idempotent transition; calls = %d", handoffs.calls)
+	}
+}
+
+func TestStateTransitionFailureIsRetriedOnIdempotentReplay(t *testing.T) {
+	t.Parallel()
+	recorder := &recordingHandoffs{err: errors.New("state unavailable")}
+	service := NewService(NewMemoryRepository(), fixedAnswerer{result: runtime.Result{TerminalDisposition: runtime.DispositionHandoff}}, WithStateRecorder(recorder))
+	command := SubmitQuestionCommand{WorkspaceID: "ws", AgentID: "agent", VisitorID: "visitor", Channel: ChannelWidget, RequestID: "req", IdempotencyKey: "ik", Question: "help"}
+	if _, err := service.SubmitQuestion(context.Background(), command); err == nil {
+		t.Fatal("expected transition failure")
+	}
+	recorder.err = nil
+	if _, err := service.SubmitQuestion(context.Background(), command); err != nil {
+		t.Fatalf("replay transition: %v", err)
+	}
+	if recorder.calls != 2 {
+		t.Fatalf("transition calls = %d, want 2", recorder.calls)
+	}
+}
+
 func (r *recordingRepository) SaveTurn(
 	ctx context.Context,
 	workspaceID string,

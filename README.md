@@ -125,6 +125,27 @@ running/completed state, counts, and per-chunk failure reasons are persisted and
 the backfill again. Provider errors are reflected by the most recent embedding health status in
 Console and retrieval errors are logged while lexical matching remains available.
 
+### Knowledge sources and file upload
+
+Open **Knowledge** in Console to see text, URL, and file sources in one list. Each source exposes
+its processing status, chunk count, creation time, and any parsing failure. Sources can be deleted
+(their chunks and retrieval visibility are removed immediately); failed files and URL sources can
+be reprocessed from the detail page.
+
+The upload area accepts one or more `.pdf`, `.docx`, `.txt`, `.md`, or `.markdown` files. Parsing
+runs on the API server. Each file is limited to **10 MiB**, and one multipart upload is limited to
+**50 MiB**. Unsupported, empty, malformed, or oversized files are retained with a failed status and
+a visible error when possible, so they do not block other files in the same upload. Successfully
+parsed files use the normal chunking path and automatically receive embeddings whenever semantic
+retrieval is configured. PDF extraction supports composite CID fonts, embedded `ToUnicode` CMaps,
+and the standard Adobe Chinese, Japanese, and Korean character collections; image-only scans still
+require OCR and are reported as having no extractable text.
+
+File uploads are idempotent within a workspace. Ariad derives the idempotency identity from the
+normalized file extension and a SHA-256 digest of the original bytes, so retrying the same upload—or
+uploading the same content under another filename—returns the existing source instead of duplicating
+its chunks. A different file format is treated separately because it follows a different parser.
+
 As a system-default alternative, set `ARIAD_EMBEDDING_MODEL` together with
 `ARIAD_MODEL_BASE_URL` and `ARIAD_MODEL_API_KEY`. A local OpenAI-compatible provider works too;
 for example, Ollama can use a Base URL such as `http://localhost:11434/v1`, an installed embedding
@@ -135,7 +156,7 @@ similarity with lexical overlap and excludes semantic-only results below the con
 
 - Every factual answer must be traceable to evidence supplied by the server.
 - Every tenant-owned record is scoped by `workspace_id`.
-- Published Agent and ready Knowledge versions are immutable.
+- Published Agent versions are immutable; knowledge sources change only through explicit delete or reprocess actions.
 - Uncertainty produces clarification, refusal, or human handoff—not invented facts.
 - API, Worker and browser runtimes have separate lifecycle and permission boundaries.
 - Contact PII stays separate from conversation transcripts and telemetry.

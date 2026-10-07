@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -850,6 +851,78 @@ func TestKnowledgeIdempotencyConflict(t *testing.T) {
 	}
 }
 
+func TestKnowledgeFileUploadListReprocessAndDelete(t *testing.T) {
+	router := newRouterWithBootstrapPassword(testLogger(), platformmodel.NewStub(), testAdminPassword)
+	response := uploadFileForTest(t, router, "policy.txt", []byte("Uploaded refund policy."))
+	if response.Code != http.StatusCreated {
+		t.Fatalf("upload = %d %s", response.Code, response.Body.String())
+	}
+	var uploaded struct {
+		Sources []knowledgeSourceResponse `json:"sources"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &uploaded); err != nil || len(uploaded.Sources) != 1 {
+		t.Fatalf("uploaded = %#v err = %v", uploaded, err)
+	}
+	source := uploaded.Sources[0]
+	if source.Status != "ready" || source.ChunkCount != 1 || source.Type != "file" {
+		t.Fatalf("source = %#v", source)
+	}
+	replayed := uploadFileForTest(t, router, "policy.txt", []byte("Uploaded refund policy."))
+	var replayPayload struct {
+		Sources []knowledgeSourceResponse `json:"sources"`
+	}
+	if err := json.Unmarshal(replayed.Body.Bytes(), &replayPayload); err != nil || len(replayPayload.Sources) != 1 || replayPayload.Sources[0].SourceID != source.SourceID {
+		t.Fatalf("replayed = %s err = %v", replayed.Body.String(), err)
+	}
+	renamed := uploadFileForTest(t, router, "renamed-policy.txt", []byte("Uploaded refund policy."))
+	var renamedPayload struct {
+		Sources []knowledgeSourceResponse `json:"sources"`
+	}
+	if err := json.Unmarshal(renamed.Body.Bytes(), &renamedPayload); err != nil || len(renamedPayload.Sources) != 1 || renamedPayload.Sources[0].SourceID != source.SourceID {
+		t.Fatalf("renamed replay = %s err = %v", renamed.Body.String(), err)
+	}
+	listed := getAdminForTest(t, router, "/api/v1/knowledge/sources?workspace_id="+developmentWorkspaceID)
+	if listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), source.SourceID) {
+		t.Fatalf("list = %d %s", listed.Code, listed.Body.String())
+	}
+	reprocessed := adminRequestForTest(t, router, http.MethodPost, "/api/v1/knowledge/sources/"+source.SourceID+"/reprocess", nil)
+	if reprocessed.Code != http.StatusOK {
+		t.Fatalf("reprocess = %d %s", reprocessed.Code, reprocessed.Body.String())
+	}
+	deleted := adminRequestForTest(t, router, http.MethodDelete, "/api/v1/knowledge/sources/"+source.SourceID, nil)
+	if deleted.Code != http.StatusOK {
+		t.Fatalf("delete = %d %s", deleted.Code, deleted.Body.String())
+	}
+}
+
+func TestFailedKnowledgeFileUploadRetryIsIdempotent(t *testing.T) {
+	router := newRouterWithBootstrapPassword(testLogger(), platformmodel.NewStub(), testAdminPassword)
+	first := uploadFileForTest(t, router, "unsupported.csv", []byte("column,value"))
+	second := uploadFileForTest(t, router, "unsupported.csv", []byte("column,value"))
+	var firstPayload, secondPayload struct {
+		Sources []knowledgeSourceResponse `json:"sources"`
+	}
+	if err := json.Unmarshal(first.Body.Bytes(), &firstPayload); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(second.Body.Bytes(), &secondPayload); err != nil {
+		t.Fatal(err)
+	}
+	if len(firstPayload.Sources) != 1 || len(secondPayload.Sources) != 1 || firstPayload.Sources[0].Status != "failed" || firstPayload.Sources[0].SourceID != secondPayload.Sources[0].SourceID {
+		t.Fatalf("first = %s second = %s", first.Body.String(), second.Body.String())
+	}
+	listed := getAdminForTest(t, router, "/api/v1/knowledge/sources?workspace_id="+developmentWorkspaceID)
+	var listPayload struct {
+		Sources []knowledgeSourceResponse `json:"sources"`
+	}
+	if err := json.Unmarshal(listed.Body.Bytes(), &listPayload); err != nil {
+		t.Fatal(err)
+	}
+	if len(listPayload.Sources) != 1 {
+		t.Fatalf("sources = %#v", listPayload.Sources)
+	}
+}
+
 func testLogger() *slog.Logger {
 	return slog.New(slog.DiscardHandler)
 }
@@ -915,6 +988,34 @@ func postAdminJSONForTest(
 	request.Header.Set("Authorization", "Bearer "+adminSessionForTest(t, handler))
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
+	return response
+}
+
+func uploadFileForTest(t *testing.T, handler http.Handler, fileName string, data []byte) *httptest.ResponseRecorder {
+	t.Helper()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("workspace_id", developmentWorkspaceID); err != nil {
+		t.Fatal(err)
+	}
+	file, err := writer.CreateFormFile("files", fileName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/knowledge/files", &body)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	request.Header.Set("Authorization", "Bearer "+adminSessionForTest(t, handler))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("upload status = %d body = %s", response.Code, response.Body.String())
+	}
 	return response
 }
 

@@ -51,12 +51,32 @@ type SubmitURLResult struct {
 // URLSubmitter ingests one public web page into knowledge.
 type URLSubmitter interface {
 	SubmitURL(ctx context.Context, command SubmitURLCommand) (SubmitURLResult, error)
+	FetchText(ctx context.Context, rawURL string) (string, error)
 }
 
 // Service coordinates URL validation, fetching, extraction and knowledge submission.
 type Service struct {
 	fetcher   Fetcher
 	knowledge knowledge.Submitter
+}
+
+func (s *Service) FetchText(ctx context.Context, rawURL string) (string, error) {
+	normalizedURL, err := validateURL(rawURL)
+	if err != nil {
+		return "", err
+	}
+	fetched, err := s.fetcher.Fetch(ctx, normalizedURL)
+	if err != nil {
+		return "", fmt.Errorf("fetch page: %w", err)
+	}
+	extracted, err := ExtractHTML(fetched.HTML)
+	if err != nil {
+		return "", err
+	}
+	if extracted.Text == "" {
+		return "", ErrNoContent
+	}
+	return extracted.Text, nil
 }
 
 // NewService creates a synchronous URL ingestion service.
@@ -117,6 +137,7 @@ func (s *Service) SubmitURL(
 		IdempotencyKey: command.IdempotencyKey,
 		Title:          title,
 		SourceURL:      normalizedURL,
+		SourceType:     "url",
 		Text:           extracted.Text,
 	})
 	if err != nil {

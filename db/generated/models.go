@@ -117,6 +117,14 @@ type KnowledgeSource struct {
 	PayloadFingerprint string         `db:"payload_fingerprint" json:"payload_fingerprint"`
 	CreatedAt          time.Time      `db:"created_at" json:"created_at"`
 	SourceUrl          sql.NullString `db:"source_url" json:"source_url"`
+	SourceType         string         `db:"source_type" json:"source_type"`
+	Status             string         `db:"status" json:"status"`
+	FileName           sql.NullString `db:"file_name" json:"file_name"`
+	MediaType          sql.NullString `db:"media_type" json:"media_type"`
+	FileSize           sql.NullInt64  `db:"file_size" json:"file_size"`
+	FileContent        []byte         `db:"file_content" json:"file_content"`
+	ErrorMessage       sql.NullString `db:"error_message" json:"error_message"`
+	UpdatedAt          time.Time      `db:"updated_at" json:"updated_at"`
 }
 
 type Outbox struct {

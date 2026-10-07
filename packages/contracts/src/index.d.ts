@@ -25,6 +25,23 @@ export interface SubmitKnowledgeResponse {
   chunk_count: number;
 }
 
+export interface KnowledgeSource {
+  source_id: string;
+  type: "text" | "url" | "file";
+  title: string;
+  status: "processing" | "ready" | "failed";
+  source_url?: string;
+  file_name?: string;
+  media_type?: string;
+  file_size?: number;
+  chunk_count: number;
+  error?: string;
+  created_at: string;
+  updated_at: string;
+}
+export interface ListKnowledgeSourcesResponse { workspace_id: string; sources: KnowledgeSource[]; }
+export interface UploadKnowledgeFilesResponse { sources: KnowledgeSource[]; }
+
 export interface SubmitURLRequest {
   workspace_id: string;
   url: string;

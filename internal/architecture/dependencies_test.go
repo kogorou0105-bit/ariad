@@ -21,6 +21,7 @@ var domainNames = map[string]struct{}{
 	"evaluation":   {},
 	"ingestion":    {},
 	"knowledge":    {},
+	"modelconfig":  {},
 	"retrieval":    {},
 	"runtime":      {},
 	"tenant":       {},

@@ -19,6 +19,7 @@ import (
 	"ariad/internal/conversation"
 	"ariad/internal/ingestion"
 	"ariad/internal/knowledge"
+	"ariad/internal/modelconfig"
 	"ariad/internal/platform/config"
 	"ariad/internal/platform/database"
 	platformfetch "ariad/internal/platform/fetch"
@@ -38,6 +39,7 @@ const (
 	maximumKnowledgeBody   = 1 << 20
 	maximumIngestionBody   = 16 << 10
 	maximumQuestionBody    = 64 << 10
+	maximumModelConfigBody = 16 << 10
 )
 
 func main() {
@@ -64,6 +66,7 @@ func run(ctx context.Context, logger *slog.Logger, settings config.Settings) err
 		settings.DatabaseURL,
 		settings.ConversationHistoryTurnLimit,
 		settings.AdminToken,
+		settings.ModelConfigEncryptionKey,
 	)
 	if err != nil {
 		return err
@@ -126,6 +129,23 @@ func newRouterWithRepositoriesAndAdminToken(
 	historyTurnLimit int,
 	adminToken string,
 ) http.Handler {
+	return newRouterWithRepositoriesAndModelConfig(
+		logger, modelAdapter, knowledgeRepository, conversationRepository, pageFetcher,
+		historyTurnLimit, adminToken, modelconfig.NewMemoryRepository(), modelconfig.Config{},
+	)
+}
+
+func newRouterWithRepositoriesAndModelConfig(
+	logger *slog.Logger,
+	modelAdapter runtime.Model,
+	knowledgeRepository knowledge.Repository,
+	conversationRepository conversation.Repository,
+	pageFetcher ingestion.Fetcher,
+	historyTurnLimit int,
+	adminToken string,
+	modelConfigRepository modelconfig.Repository,
+	fallbackModelConfig modelconfig.Config,
+) http.Handler {
 	knowledgeService := knowledge.NewService(knowledgeRepository)
 	ingestionService := ingestion.NewService(pageFetcher, knowledgeService)
 	retrievalService := retrieval.NewService(knowledgeService)
@@ -137,7 +157,8 @@ func newRouterWithRepositoriesAndAdminToken(
 		Instructions: "Answer only from the supplied evidence. " +
 			"Never invent facts and cite every factual answer.",
 	}})
-	runtimeService := runtime.NewService(agentReader, retrievalService, modelAdapter)
+	modelConfigService := modelconfig.NewService(modelConfigRepository, fallbackModelConfig)
+	runtimeService := runtime.NewService(agentReader, retrievalService, platformmodel.NewWorkspaceModel(modelConfigService, modelAdapter))
 	conversationService := conversation.NewService(
 		conversationRepository,
 		runtimeService,
@@ -147,7 +168,7 @@ func newRouterWithRepositoriesAndAdminToken(
 	// identifiers derived from an authenticated token/session. Request-body IDs
 	// are compatibility fields to validate, never the authority used downstream.
 	scope := requestScope{workspaceID: developmentWorkspaceID, agentID: developmentAgentID}
-	return newRouterWithServices(logger, scope, knowledgeService, ingestionService, conversationService, adminToken)
+	return newRouterWithServices(logger, scope, knowledgeService, ingestionService, conversationService, modelConfigService, adminToken)
 }
 
 func newConfiguredRouter(
@@ -157,9 +178,15 @@ func newConfiguredRouter(
 	databaseURL string,
 	historyTurnLimit int,
 	adminToken string,
+	modelConfigEncryptionKey string,
 ) (http.Handler, func() error, error) {
+	environmentModel := platformmodel.SettingsFromEnvironment()
+	fallbackConfig := modelconfig.Config{BaseURL: environmentModel.BaseURL, Model: environmentModel.Model, APIKey: environmentModel.APIKey}
+	if environmentModel.APIKey == "" {
+		fallbackConfig = modelconfig.Config{Model: "grounded-v1"}
+	}
 	if databaseURL == "" {
-		return newRouterWithRepositoriesAndAdminToken(
+		return newRouterWithRepositoriesAndModelConfig(
 			logger,
 			modelAdapter,
 			knowledge.NewMemoryRepository(),
@@ -167,6 +194,8 @@ func newConfiguredRouter(
 			platformfetch.NewHTTPFetcher(),
 			historyTurnLimit,
 			adminToken,
+			modelconfig.NewMemoryRepository(),
+			fallbackConfig,
 		), func() error { return nil }, nil
 	}
 	postgres, err := database.Open(ctx, databaseURL)
@@ -177,7 +206,12 @@ func newConfiguredRouter(
 		_ = postgres.Close()
 		return nil, nil, err
 	}
-	handler := newRouterWithRepositoriesAndAdminToken(
+	modelConfigRepository, err := database.NewModelConfigRepository(postgres, modelConfigEncryptionKey)
+	if err != nil {
+		_ = postgres.Close()
+		return nil, nil, err
+	}
+	handler := newRouterWithRepositoriesAndModelConfig(
 		logger,
 		modelAdapter,
 		database.NewKnowledgeRepository(postgres),
@@ -185,6 +219,8 @@ func newConfiguredRouter(
 		platformfetch.NewHTTPFetcher(),
 		historyTurnLimit,
 		adminToken,
+		modelConfigRepository,
+		fallbackConfig,
 	)
 	return handler, postgres.Close, nil
 }
@@ -195,6 +231,7 @@ func newRouterWithServices(
 	knowledgeService *knowledge.Service,
 	ingestionService ingestion.URLSubmitter,
 	conversationService conversation.QuestionService,
+	modelConfigService *modelconfig.Service,
 	adminToken string,
 ) http.Handler {
 	handlers := apiHandlers{
@@ -203,6 +240,7 @@ func newRouterWithServices(
 		knowledge:    knowledgeService,
 		ingestion:    ingestionService,
 		conversation: conversationService,
+		modelConfig:  modelConfigService,
 	}
 	router := chi.NewRouter()
 	router.Use(middleware.RequestID)
@@ -223,6 +261,9 @@ func newRouterWithServices(
 			management.Post("/api/v1/knowledge/text", handlers.submitKnowledge)
 			management.Post("/api/v1/ingestion/url", handlers.submitURL)
 			management.Get("/api/v1/conversations", handlers.listConversations)
+			management.Get("/api/v1/model-config", handlers.getModelConfig)
+			management.Put("/api/v1/model-config", handlers.saveModelConfig)
+			management.Delete("/api/v1/model-config", handlers.resetModelConfig)
 		})
 	})
 
@@ -235,6 +276,7 @@ type apiHandlers struct {
 	knowledge    *knowledge.Service
 	ingestion    ingestion.URLSubmitter
 	conversation conversation.QuestionService
+	modelConfig  *modelconfig.Service
 }
 
 type requestScope struct {
@@ -437,6 +479,21 @@ type listConversationsResponse struct {
 	Conversations []conversationSummaryResponse `json:"conversations"`
 }
 
+type modelConfigRequest struct {
+	WorkspaceID string `json:"workspace_id"`
+	BaseURL     string `json:"base_url"`
+	Model       string `json:"model"`
+	APIKey      string `json:"api_key"`
+}
+
+type modelConfigResponse struct {
+	WorkspaceID string `json:"workspace_id"`
+	Source      string `json:"source"`
+	BaseURL     string `json:"base_url"`
+	Model       string `json:"model"`
+	APIKeyMask  string `json:"api_key_mask"`
+}
+
 func (h apiHandlers) submitQuestion(response http.ResponseWriter, request *http.Request) {
 	var input submitQuestionRequest
 	if err := decodeJSON(response, request, maximumQuestionBody, &input); err != nil {
@@ -578,6 +635,72 @@ func (h apiHandlers) listConversations(response http.ResponseWriter, request *ht
 	h.writeJSON(response, http.StatusOK, listConversationsResponse{
 		WorkspaceID: h.scope.workspaceID, Conversations: items,
 	})
+}
+
+func (h apiHandlers) getModelConfig(response http.ResponseWriter, request *http.Request) {
+	workspaceID := request.URL.Query().Get("workspace_id")
+	requestID := middleware.GetReqID(request.Context())
+	if workspaceID != h.scope.workspaceID {
+		h.writeError(response, http.StatusForbidden, "workspace_not_allowed", "unknown workspace", requestID)
+		return
+	}
+	status, err := h.modelConfig.GetStatus(request.Context(), h.scope.workspaceID)
+	if err != nil {
+		h.writeError(response, http.StatusInternalServerError, "internal_error", "could not load model configuration", requestID)
+		return
+	}
+	h.writeJSON(response, http.StatusOK, modelConfigResponseFromStatus(status))
+}
+
+func (h apiHandlers) saveModelConfig(response http.ResponseWriter, request *http.Request) {
+	var input modelConfigRequest
+	if err := decodeJSON(response, request, maximumModelConfigBody, &input); err != nil {
+		h.writeError(response, http.StatusBadRequest, "invalid_request", err.Error(), middleware.GetReqID(request.Context()))
+		return
+	}
+	requestID := middleware.GetReqID(request.Context())
+	if input.WorkspaceID != h.scope.workspaceID {
+		h.writeError(response, http.StatusForbidden, "workspace_not_allowed", "unknown workspace", requestID)
+		return
+	}
+	status, err := h.modelConfig.Save(request.Context(), modelconfig.SaveCommand{
+		WorkspaceID: h.scope.workspaceID, BaseURL: input.BaseURL, Model: input.Model, APIKey: input.APIKey,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, modelconfig.ErrInvalidBaseURL), errors.Is(err, modelconfig.ErrModelRequired), errors.Is(err, modelconfig.ErrAPIKeyRequired):
+			h.writeError(response, http.StatusBadRequest, "invalid_model_config", err.Error(), requestID)
+		case errors.Is(err, modelconfig.ErrEncryptionDisabled):
+			h.writeError(response, http.StatusServiceUnavailable, "model_config_unavailable", modelconfig.ErrEncryptionDisabled.Error(), requestID)
+		default:
+			h.writeError(response, http.StatusInternalServerError, "internal_error", "could not save model configuration", requestID)
+		}
+		return
+	}
+	h.writeJSON(response, http.StatusOK, modelConfigResponseFromStatus(status))
+}
+
+func (h apiHandlers) resetModelConfig(response http.ResponseWriter, request *http.Request) {
+	workspaceID := request.URL.Query().Get("workspace_id")
+	requestID := middleware.GetReqID(request.Context())
+	if workspaceID != h.scope.workspaceID {
+		h.writeError(response, http.StatusForbidden, "workspace_not_allowed", "unknown workspace", requestID)
+		return
+	}
+	status, err := h.modelConfig.Reset(request.Context(), h.scope.workspaceID)
+	if err != nil {
+		if errors.Is(err, modelconfig.ErrEncryptionDisabled) {
+			h.writeError(response, http.StatusServiceUnavailable, "model_config_unavailable", modelconfig.ErrEncryptionDisabled.Error(), requestID)
+			return
+		}
+		h.writeError(response, http.StatusInternalServerError, "internal_error", "could not reset model configuration", requestID)
+		return
+	}
+	h.writeJSON(response, http.StatusOK, modelConfigResponseFromStatus(status))
+}
+
+func modelConfigResponseFromStatus(status modelconfig.Status) modelConfigResponse {
+	return modelConfigResponse{WorkspaceID: status.WorkspaceID, Source: status.Source, BaseURL: status.BaseURL, Model: status.Model, APIKeyMask: status.APIKeyMask}
 }
 
 func citationResponses(citations []conversation.Citation) []citationResponse {

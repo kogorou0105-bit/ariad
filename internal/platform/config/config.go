@@ -19,6 +19,7 @@ type Settings struct {
 	LogLevel                     string
 	DatabaseURL                  string
 	AdminToken                   string
+	ModelConfigEncryptionKey     string
 	ConversationHistoryTurnLimit int
 }
 
@@ -26,10 +27,11 @@ type Settings struct {
 // state, so API and Worker lifecycles remain independent.
 func Load() Settings {
 	return Settings{
-		APIAddress:  valueOrDefault("ARIAD_API_ADDR", defaultAPIAddress),
-		LogLevel:    valueOrDefault("ARIAD_LOG_LEVEL", defaultLogLevel),
-		DatabaseURL: os.Getenv("ARIAD_DATABASE_URL"),
-		AdminToken:  os.Getenv("ARIAD_ADMIN_TOKEN"),
+		APIAddress:               valueOrDefault("ARIAD_API_ADDR", defaultAPIAddress),
+		LogLevel:                 valueOrDefault("ARIAD_LOG_LEVEL", defaultLogLevel),
+		DatabaseURL:              os.Getenv("ARIAD_DATABASE_URL"),
+		AdminToken:               os.Getenv("ARIAD_ADMIN_TOKEN"),
+		ModelConfigEncryptionKey: os.Getenv("ARIAD_MODEL_CONFIG_ENCRYPTION_KEY"),
 		ConversationHistoryTurnLimit: positiveIntOrDefault(
 			"ARIAD_CONVERSATION_HISTORY_TURN_LIMIT",
 			defaultConversationHistoryTurnLimit,

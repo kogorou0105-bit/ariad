@@ -1,15 +1,19 @@
 package database
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"ariad/internal/conversation"
 	"ariad/internal/knowledge"
+	"ariad/internal/modelconfig"
 	"ariad/internal/runtime"
 	"ariad/internal/usage"
 
@@ -23,6 +27,10 @@ func TestPostgresRepositories(t *testing.T) {
 	database := openTestDatabase(t)
 	knowledgeRepository := NewKnowledgeRepository(database)
 	conversationRepository := NewConversationRepository(database)
+	modelConfigRepository, err := NewModelConfigRepository(database, base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32)))
+	if err != nil {
+		t.Fatalf("create model config repository: %v", err)
+	}
 
 	t.Run("isolates workspaces", func(t *testing.T) {
 		testWorkspaceIsolation(t, knowledgeRepository, conversationRepository)
@@ -42,6 +50,36 @@ func TestPostgresRepositories(t *testing.T) {
 	t.Run("lists conversation summaries by recent activity", func(t *testing.T) {
 		testListConversations(t, conversationRepository)
 	})
+	t.Run("encrypts and isolates workspace model configurations", func(t *testing.T) {
+		testWorkspaceModelConfigs(t, database, modelConfigRepository)
+	})
+}
+
+func testWorkspaceModelConfigs(t *testing.T, database *sql.DB, repository *ModelConfigRepository) {
+	t.Helper()
+	ctx := context.Background()
+	secret := "database-workspace-secret"
+	config := modelconfig.Config{WorkspaceID: "ws_model", BaseURL: "https://model.example/v1", Model: "custom", APIKey: secret, UpdatedAt: time.Now().UTC()}
+	if err := repository.Save(ctx, config); err != nil {
+		t.Fatalf("save model config: %v", err)
+	}
+	var ciphertext string
+	if err := database.QueryRowContext(ctx, "SELECT api_key_ciphertext FROM workspace_model_configs WHERE workspace_id = $1", config.WorkspaceID).Scan(&ciphertext); err != nil {
+		t.Fatalf("read ciphertext: %v", err)
+	}
+	if ciphertext == secret || strings.Contains(ciphertext, secret) {
+		t.Fatal("API key was stored in plaintext")
+	}
+	loaded, found, err := repository.Get(ctx, config.WorkspaceID)
+	if err != nil || !found || loaded.APIKey != secret {
+		t.Fatalf("loaded = %#v, found = %v, err = %v", loaded, found, err)
+	}
+	if _, found, err := repository.Get(ctx, "ws_model_other"); err != nil || found {
+		t.Fatalf("other workspace found = %v, err = %v", found, err)
+	}
+	if err := repository.Delete(ctx, config.WorkspaceID); err != nil {
+		t.Fatalf("delete model config: %v", err)
+	}
 }
 
 func testListConversations(t *testing.T, repository *ConversationRepository) {

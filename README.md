@@ -84,7 +84,11 @@ excludes frontend dependencies.
 | `ARIAD_API_ADDR` | `:8080` | Go API listen address |
 | `ARIAD_LOG_LEVEL` | `info` | API and Worker log level |
 | `ARIAD_ADMIN_TOKEN` | unset | Whitespace-free Bearer token for management endpoints; unset rejects all management requests |
+| `ARIAD_MODEL_CONFIG_ENCRYPTION_KEY` | unset | Base64-encoded 32-byte AES key required to persist workspace BYOK configuration |
 | `ARIAD_CONVERSATION_HISTORY_TURN_LIMIT` | `5` | Recent turns included in model context |
+
+Generate the workspace model-configuration encryption key with `openssl rand -base64 32`
+and keep it stable across API restarts. Losing or changing it makes persisted workspace API keys undecryptable.
 
 ## Product constraints
 

@@ -96,6 +96,23 @@ export interface ListConversationsResponse {
   conversations: ConversationSummary[];
 }
 
+export type ModelConfigSource = "workspace" | "system_default" | "local";
+
+export interface ModelConfigResponse {
+  workspace_id: string;
+  source: ModelConfigSource;
+  base_url: string;
+  model: string;
+  api_key_mask: string;
+}
+
+export interface SaveModelConfigRequest {
+  workspace_id: string;
+  base_url: string;
+  model: string;
+  api_key: string;
+}
+
 export interface APIErrorResponse {
   error: {
     code: string;

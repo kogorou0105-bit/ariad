@@ -1,6 +1,6 @@
 import { createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
 
-import { ConsoleShell, ConversationDetailPage, ConversationsPage, OverviewPage } from "./App";
+import { ConsoleShell, ConversationDetailPage, ConversationsPage, ModelConfigPage, OverviewPage } from "./App";
 
 const rootRoute = createRootRoute({ component: ConsoleShell });
 const indexRoute = createRoute({
@@ -21,7 +21,8 @@ const conversationDetailRoute = createRoute({
   }),
   component: ConversationDetailPage,
 });
-const routeTree = rootRoute.addChildren([indexRoute, conversationsRoute, conversationDetailRoute]);
+const modelConfigRoute = createRoute({ getParentRoute: () => rootRoute, path: "/settings/model", component: ModelConfigPage });
+const routeTree = rootRoute.addChildren([indexRoute, conversationsRoute, conversationDetailRoute, modelConfigRoute]);
 
 export const router = createRouter({ routeTree });
 

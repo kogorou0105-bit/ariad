@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"ariad/internal/modelconfig"
 	"ariad/internal/runtime"
 )
 
@@ -270,6 +271,42 @@ func TestNewFromEnvironmentUsesDeepSeekDefaults(t *testing.T) {
 	if adapter.endpoint != defaultModelBaseURL+"/chat/completions" ||
 		adapter.model != defaultModelName || adapter.provider != "deepseek" {
 		t.Fatalf("adapter configuration = %#v", adapter)
+	}
+}
+
+func TestWorkspaceModelUsesSavedConfigurationImmediatelyAndResetsToFallback(t *testing.T) {
+	t.Parallel()
+	var authorization string
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		authorization = request.Header.Get("Authorization")
+		writeCompletion(t, response, `{"model":"workspace-model","choices":[{"message":{"content":"Workspace answer.\nCITATIONS: ev_one"}}]}`)
+	}))
+	defer server.Close()
+
+	repository := modelconfig.NewMemoryRepository()
+	service := modelconfig.NewService(repository, modelconfig.Config{})
+	adapter := NewWorkspaceModel(service, NewStub())
+	if _, err := service.Save(context.Background(), modelconfig.SaveCommand{
+		WorkspaceID: "ws_one", BaseURL: server.URL, Model: "workspace-model", APIKey: "workspace-key",
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	result, err := adapter.Generate(context.Background(), modelRequest())
+	if err != nil {
+		t.Fatalf("generate with workspace config: %v", err)
+	}
+	if authorization != "Bearer workspace-key" || result.Text != "Workspace answer." {
+		t.Fatalf("authorization = %q, result = %#v", authorization, result)
+	}
+	if _, err := service.Reset(context.Background(), "ws_one"); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+	result, err = adapter.Generate(context.Background(), modelRequest())
+	if err != nil {
+		t.Fatalf("generate with fallback: %v", err)
+	}
+	if result.Usage.Provider != "stub" {
+		t.Fatalf("provider after reset = %q", result.Usage.Provider)
 	}
 }
 

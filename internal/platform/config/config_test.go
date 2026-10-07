@@ -7,6 +7,7 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("ARIAD_LOG_LEVEL", "")
 	t.Setenv("ARIAD_DATABASE_URL", "")
 	t.Setenv("ARIAD_ADMIN_TOKEN", "")
+	t.Setenv("ARIAD_MODEL_CONFIG_ENCRYPTION_KEY", "")
 	t.Setenv("ARIAD_CONVERSATION_HISTORY_TURN_LIMIT", "")
 
 	settings := Load()
@@ -22,6 +23,9 @@ func TestLoadDefaults(t *testing.T) {
 	if settings.AdminToken != "" {
 		t.Fatalf("AdminToken = %q, want empty", settings.AdminToken)
 	}
+	if settings.ModelConfigEncryptionKey != "" {
+		t.Fatalf("ModelConfigEncryptionKey must be empty")
+	}
 	if settings.ConversationHistoryTurnLimit != 5 {
 		t.Fatalf("ConversationHistoryTurnLimit = %d, want 5", settings.ConversationHistoryTurnLimit)
 	}
@@ -32,6 +36,7 @@ func TestLoadEnvironment(t *testing.T) {
 	t.Setenv("ARIAD_LOG_LEVEL", "debug")
 	t.Setenv("ARIAD_DATABASE_URL", "postgres://ariad:secret@localhost:5432/ariad")
 	t.Setenv("ARIAD_ADMIN_TOKEN", "admin-secret")
+	t.Setenv("ARIAD_MODEL_CONFIG_ENCRYPTION_KEY", "encoded-key")
 	t.Setenv("ARIAD_CONVERSATION_HISTORY_TURN_LIMIT", "8")
 
 	settings := Load()
@@ -46,6 +51,9 @@ func TestLoadEnvironment(t *testing.T) {
 	}
 	if settings.AdminToken != "admin-secret" {
 		t.Fatalf("AdminToken = %q", settings.AdminToken)
+	}
+	if settings.ModelConfigEncryptionKey != "encoded-key" {
+		t.Fatalf("ModelConfigEncryptionKey = %q", settings.ModelConfigEncryptionKey)
 	}
 	if settings.ConversationHistoryTurnLimit != 8 {
 		t.Fatalf("ConversationHistoryTurnLimit = %d", settings.ConversationHistoryTurnLimit)

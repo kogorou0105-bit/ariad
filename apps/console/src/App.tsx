@@ -2,8 +2,10 @@ import type {
   APIErrorResponse,
   GetConversationHistoryResponse,
   ListConversationsResponse,
+  ModelConfigResponse,
+  SaveModelConfigRequest,
 } from "@ariad/contracts";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, Outlet, useParams, useSearch } from "@tanstack/react-router";
 import { type FormEvent, useEffect, useState } from "react";
 
@@ -18,9 +20,13 @@ async function requestJSON<Response>(
   path: string,
   token: string | null,
   clearTokenOnUnauthorized: boolean,
+  init?: RequestInit,
 ): Promise<Response> {
+  const headers = new Headers(init?.headers);
+  if (token) headers.set("Authorization", `Bearer ${token}`);
   const response = await fetch(path, {
-    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+    ...init,
+    headers,
   });
   if (response.status === 401 && clearTokenOnUnauthorized) {
     sessionStorage.removeItem(adminTokenStorageKey);
@@ -42,6 +48,14 @@ async function requestJSON<Response>(
 
 function getJSON<Response>(path: string): Promise<Response> {
   return requestJSON(path, sessionStorage.getItem(adminTokenStorageKey), true);
+}
+
+function sendJSON<Request, Response>(path: string, method: "PUT" | "DELETE", body?: Request): Promise<Response> {
+  return requestJSON(path, sessionStorage.getItem(adminTokenStorageKey), true, {
+    method,
+    headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
 }
 
 function formatActivity(value: string): string {
@@ -86,6 +100,7 @@ export function ConsoleShell() {
           <span className="nav-item nav-item-disabled">Agents</span>
           <span className="nav-item nav-item-disabled">Knowledge</span>
           <Link className="nav-item" activeProps={{ className: "nav-item nav-item-active" }} to="/conversations">Conversations</Link>
+          <Link className="nav-item" activeProps={{ className: "nav-item nav-item-active" }} to="/settings/model">Model configuration</Link>
           <span className="nav-item nav-item-disabled">Evaluations</span>
         </nav>
         <button className="logout-button" type="button" onClick={logout}>Log out</button>
@@ -94,6 +109,74 @@ export function ConsoleShell() {
         <Outlet />
       </main>
     </div>
+  );
+}
+
+export function ModelConfigPage() {
+  const path = `/api/v1/model-config?workspace_id=${encodeURIComponent(workspaceID)}`;
+  const configQuery = useQuery({ queryKey: ["model-config", workspaceID], queryFn: () => getJSON<ModelConfigResponse>(path) });
+  const config = configQuery.data;
+  return (
+    <section className="model-config-page">
+      <div className="eyebrow">Workspace / Settings</div>
+      <h1>Model configuration</h1>
+      <p className="lede">Use your own OpenAI-compatible model endpoint for this workspace.</p>
+      {configQuery.isPending && <p className="empty-state">Loading model configuration…</p>}
+      {configQuery.error && <p className="notice error" role="alert">{configQuery.error.message}</p>}
+      {config && <ModelConfigEditor config={config} path={path} />}
+    </section>
+  );
+}
+
+function ModelConfigEditor({ config, path }: { config: ModelConfigResponse; path: string }) {
+  const queryClient = useQueryClient();
+  const [baseURL, setBaseURL] = useState(config.base_url);
+  const [model, setModel] = useState(config.model);
+  const [apiKey, setAPIKey] = useState("");
+  const [notice, setNotice] = useState("");
+  const saveMutation = useMutation({
+    mutationFn: (input: SaveModelConfigRequest) => sendJSON<SaveModelConfigRequest, ModelConfigResponse>(path, "PUT", input),
+    onSuccess: (response) => {
+      queryClient.setQueryData(["model-config", workspaceID], response);
+      setBaseURL(response.base_url);
+      setModel(response.model);
+      setAPIKey("");
+      setNotice("Workspace model configuration saved and active.");
+    },
+    onMutate: () => setNotice(""),
+  });
+  const resetMutation = useMutation({
+    mutationFn: () => sendJSON<never, ModelConfigResponse>(path, "DELETE"),
+    onSuccess: (response) => {
+      queryClient.setQueryData(["model-config", workspaceID], response);
+      setBaseURL(response.base_url);
+      setModel(response.model);
+      setAPIKey("");
+      setNotice("Workspace configuration cleared. System default restored.");
+    },
+    onMutate: () => setNotice(""),
+  });
+
+  function save(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    saveMutation.mutate({ workspace_id: workspaceID, base_url: baseURL, model, api_key: apiKey });
+  }
+  const error = saveMutation.error ?? resetMutation.error;
+  return (
+    <>
+      <div className="config-status">
+        <strong>{config.source === "workspace" ? "Workspace custom configuration" : config.source === "system_default" ? "System default configuration" : "Local fallback model"}</strong>
+        <dl><div><dt>Model</dt><dd>{config.model || "Local grounded model"}</dd></div><div><dt>Base URL</dt><dd>{config.base_url || "Not applicable"}</dd></div><div><dt>API Key</dt><dd>{config.api_key_mask || "Not configured"}</dd></div></dl>
+      </div>
+      <form className="model-config-form" onSubmit={save}>
+        <label htmlFor="model-base-url">Base URL</label><input id="model-base-url" type="url" required value={baseURL} onChange={(event) => setBaseURL(event.target.value)} />
+        <label htmlFor="model-name">Model name</label><input id="model-name" required value={model} onChange={(event) => setModel(event.target.value)} />
+        <label htmlFor="model-api-key">API Key</label><input id="model-api-key" type="password" autoComplete="new-password" value={apiKey} onChange={(event) => setAPIKey(event.target.value)} placeholder={config?.source === "workspace" ? "Leave blank to keep the existing key" : "Required for first save"} />
+        <div className="config-actions"><button type="submit" disabled={saveMutation.isPending || resetMutation.isPending}>{saveMutation.isPending ? "Saving…" : "Save configuration"}</button><button className="secondary-button" type="button" disabled={saveMutation.isPending || resetMutation.isPending || config?.source !== "workspace"} onClick={() => resetMutation.mutate()}>{resetMutation.isPending ? "Resetting…" : "Reset to system default"}</button></div>
+      </form>
+      {notice && <p className="notice success" role="status">{notice}</p>}
+      {error && <p className="notice error" role="alert">{error.message}</p>}
+    </>
   );
 }
 

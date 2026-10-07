@@ -64,6 +64,28 @@ func (r *ConversationRepository) ConversationExists(
 	return exists, nil
 }
 
+// ListConversations returns workspace-scoped conversation summaries.
+func (r *ConversationRepository) ListConversations(
+	ctx context.Context,
+	workspaceID string,
+) ([]conversation.Summary, error) {
+	rows, err := r.queries.ListConversations(ctx, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("query conversations: %w", err)
+	}
+	summaries := make([]conversation.Summary, 0, len(rows))
+	for _, row := range rows {
+		summaries = append(summaries, conversation.Summary{
+			ConversationID:  row.ConversationID,
+			VisitorID:       row.VisitorID,
+			MessageCount:    row.MessageCount,
+			LastActivityAt:  row.LastActivityAt,
+			LastMessageText: row.LastMessageText,
+		})
+	}
+	return summaries, nil
+}
+
 // ListTurns returns the most recent limited set in chronological order. A
 // zero limit returns the full conversation.
 func (r *ConversationRepository) ListTurns(

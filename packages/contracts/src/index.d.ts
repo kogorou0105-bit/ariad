@@ -83,6 +83,19 @@ export interface GetConversationHistoryResponse {
   turns: ConversationTurn[];
 }
 
+export interface ConversationSummary {
+  conversation_id: string;
+  visitor_id: string;
+  message_count: number;
+  last_activity_at: string;
+  last_message_text: string;
+}
+
+export interface ListConversationsResponse {
+  workspace_id: string;
+  conversations: ConversationSummary[];
+}
+
 export interface APIErrorResponse {
   error: {
     code: string;

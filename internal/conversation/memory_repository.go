@@ -17,6 +17,43 @@ type MemoryRepository struct {
 	conversations map[string]map[string]string
 }
 
+// ListConversations returns summaries for one workspace in descending activity order.
+func (r *MemoryRepository) ListConversations(ctx context.Context, workspaceID string) ([]Summary, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("list conversations: %w", err)
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	byConversation := make(map[string]Summary)
+	latestMessageIDs := make(map[string]string)
+	for _, record := range r.turns[workspaceID] {
+		message := record.Turn.Message
+		summary, found := byConversation[message.ConversationID]
+		if !found {
+			summary = Summary{ConversationID: message.ConversationID, VisitorID: message.VisitorID}
+		}
+		summary.MessageCount++
+		if !found || message.CreatedAt.After(summary.LastActivityAt) ||
+			(message.CreatedAt.Equal(summary.LastActivityAt) && message.ID > latestMessageIDs[message.ConversationID]) {
+			summary.LastActivityAt = message.CreatedAt
+			summary.LastMessageText = message.Text
+			latestMessageIDs[message.ConversationID] = message.ID
+		}
+		byConversation[message.ConversationID] = summary
+	}
+	summaries := make([]Summary, 0, len(byConversation))
+	for _, summary := range byConversation {
+		summaries = append(summaries, summary)
+	}
+	sort.Slice(summaries, func(left, right int) bool {
+		if summaries[left].LastActivityAt.Equal(summaries[right].LastActivityAt) {
+			return summaries[left].ConversationID > summaries[right].ConversationID
+		}
+		return summaries[left].LastActivityAt.After(summaries[right].LastActivityAt)
+	})
+	return summaries, nil
+}
+
 // ListTurns returns the most recent limited set in chronological order. A
 // zero limit returns the full conversation.
 func (r *MemoryRepository) ListTurns(

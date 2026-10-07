@@ -492,6 +492,56 @@ func (q *Queries) ListConversationTurns(ctx context.Context, arg ListConversatio
 	return items, nil
 }
 
+const listConversations = `-- name: ListConversations :many
+SELECT
+    conversation_id,
+    visitor_id,
+    COUNT(*) AS message_count,
+    MAX(created_at)::timestamptz AS last_activity_at,
+    ((ARRAY_AGG(text ORDER BY created_at DESC, message_id DESC))[1])::text AS last_message_text
+FROM conversation_messages
+WHERE workspace_id = $1
+GROUP BY conversation_id, visitor_id
+ORDER BY last_activity_at DESC, conversation_id DESC
+`
+
+type ListConversationsRow struct {
+	ConversationID  string    `db:"conversation_id" json:"conversation_id"`
+	VisitorID       string    `db:"visitor_id" json:"visitor_id"`
+	MessageCount    int64     `db:"message_count" json:"message_count"`
+	LastActivityAt  time.Time `db:"last_activity_at" json:"last_activity_at"`
+	LastMessageText string    `db:"last_message_text" json:"last_message_text"`
+}
+
+func (q *Queries) ListConversations(ctx context.Context, workspaceID string) ([]ListConversationsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listConversations, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListConversationsRow{}
+	for rows.Next() {
+		var i ListConversationsRow
+		if err := rows.Scan(
+			&i.ConversationID,
+			&i.VisitorID,
+			&i.MessageCount,
+			&i.LastActivityAt,
+			&i.LastMessageText,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const lockConversation = `-- name: LockConversation :exec
 SELECT pg_advisory_xact_lock(hashtextextended(
     'conversation:' || $1 || ':' || $2,

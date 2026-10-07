@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"ariad/internal/agent"
+	"ariad/internal/auth"
 	"ariad/internal/conversation"
 	"ariad/internal/ingestion"
 	"ariad/internal/knowledge"
@@ -62,6 +63,7 @@ func run(ctx context.Context, logger *slog.Logger, settings config.Settings) err
 		modelAdapter,
 		settings.DatabaseURL,
 		settings.ConversationHistoryTurnLimit,
+		settings.AdminToken,
 	)
 	if err != nil {
 		return err
@@ -100,59 +102,29 @@ func run(ctx context.Context, logger *slog.Logger, settings config.Settings) err
 }
 
 func newRouter(logger *slog.Logger, modelAdapter runtime.Model) http.Handler {
-	return newRouterWithRepositories(
+	return newRouterWithAdminToken(logger, modelAdapter, "")
+}
+
+func newRouterWithAdminToken(logger *slog.Logger, modelAdapter runtime.Model, adminToken string) http.Handler {
+	return newRouterWithRepositoriesAndAdminToken(
 		logger,
 		modelAdapter,
 		knowledge.NewMemoryRepository(),
 		conversation.NewMemoryRepository(),
 		platformfetch.NewHTTPFetcher(),
 		0,
+		adminToken,
 	)
 }
 
-func newConfiguredRouter(
-	ctx context.Context,
-	logger *slog.Logger,
-	modelAdapter runtime.Model,
-	databaseURL string,
-	historyTurnLimit int,
-) (http.Handler, func() error, error) {
-	if databaseURL == "" {
-		return newRouterWithRepositories(
-			logger,
-			modelAdapter,
-			knowledge.NewMemoryRepository(),
-			conversation.NewMemoryRepository(),
-			platformfetch.NewHTTPFetcher(),
-			historyTurnLimit,
-		), func() error { return nil }, nil
-	}
-	postgres, err := database.Open(ctx, databaseURL)
-	if err != nil {
-		return nil, nil, fmt.Errorf("connect persistence: %w", err)
-	}
-	if err := database.VerifySchemaReady(ctx, postgres); err != nil {
-		_ = postgres.Close()
-		return nil, nil, err
-	}
-	handler := newRouterWithRepositories(
-		logger,
-		modelAdapter,
-		database.NewKnowledgeRepository(postgres),
-		database.NewConversationRepository(postgres),
-		platformfetch.NewHTTPFetcher(),
-		historyTurnLimit,
-	)
-	return handler, postgres.Close, nil
-}
-
-func newRouterWithRepositories(
+func newRouterWithRepositoriesAndAdminToken(
 	logger *slog.Logger,
 	modelAdapter runtime.Model,
 	knowledgeRepository knowledge.Repository,
 	conversationRepository conversation.Repository,
 	pageFetcher ingestion.Fetcher,
 	historyTurnLimit int,
+	adminToken string,
 ) http.Handler {
 	knowledgeService := knowledge.NewService(knowledgeRepository)
 	ingestionService := ingestion.NewService(pageFetcher, knowledgeService)
@@ -175,7 +147,46 @@ func newRouterWithRepositories(
 	// identifiers derived from an authenticated token/session. Request-body IDs
 	// are compatibility fields to validate, never the authority used downstream.
 	scope := requestScope{workspaceID: developmentWorkspaceID, agentID: developmentAgentID}
-	return newRouterWithServices(logger, scope, knowledgeService, ingestionService, conversationService)
+	return newRouterWithServices(logger, scope, knowledgeService, ingestionService, conversationService, adminToken)
+}
+
+func newConfiguredRouter(
+	ctx context.Context,
+	logger *slog.Logger,
+	modelAdapter runtime.Model,
+	databaseURL string,
+	historyTurnLimit int,
+	adminToken string,
+) (http.Handler, func() error, error) {
+	if databaseURL == "" {
+		return newRouterWithRepositoriesAndAdminToken(
+			logger,
+			modelAdapter,
+			knowledge.NewMemoryRepository(),
+			conversation.NewMemoryRepository(),
+			platformfetch.NewHTTPFetcher(),
+			historyTurnLimit,
+			adminToken,
+		), func() error { return nil }, nil
+	}
+	postgres, err := database.Open(ctx, databaseURL)
+	if err != nil {
+		return nil, nil, fmt.Errorf("connect persistence: %w", err)
+	}
+	if err := database.VerifySchemaReady(ctx, postgres); err != nil {
+		_ = postgres.Close()
+		return nil, nil, err
+	}
+	handler := newRouterWithRepositoriesAndAdminToken(
+		logger,
+		modelAdapter,
+		database.NewKnowledgeRepository(postgres),
+		database.NewConversationRepository(postgres),
+		platformfetch.NewHTTPFetcher(),
+		historyTurnLimit,
+		adminToken,
+	)
+	return handler, postgres.Close, nil
 }
 
 func newRouterWithServices(
@@ -184,6 +195,7 @@ func newRouterWithServices(
 	knowledgeService *knowledge.Service,
 	ingestionService ingestion.URLSubmitter,
 	conversationService conversation.QuestionService,
+	adminToken string,
 ) http.Handler {
 	handlers := apiHandlers{
 		logger:       logger,
@@ -196,6 +208,7 @@ func newRouterWithServices(
 	router.Use(middleware.RequestID)
 	router.Use(middleware.RealIP)
 	router.Use(middleware.Recoverer)
+	adminAuthentication := auth.NewAdminMiddleware(adminToken, logger)
 
 	// Bounded request/response endpoints opt into a handler deadline. Streaming
 	// routes such as SSE must be registered outside this group and manage their
@@ -203,11 +216,14 @@ func newRouterWithServices(
 	router.Group(func(bounded chi.Router) {
 		bounded.Use(middleware.Timeout(30 * time.Second))
 		bounded.Get("/healthz", health.Handler)
-		bounded.Post("/api/v1/knowledge/text", handlers.submitKnowledge)
-		bounded.Post("/api/v1/ingestion/url", handlers.submitURL)
 		bounded.Post("/api/v1/questions", handlers.submitQuestion)
-		bounded.Get("/api/v1/conversations", handlers.listConversations)
 		bounded.Get("/api/v1/conversations/{conversation_id}", handlers.listConversationTurns)
+		bounded.Group(func(management chi.Router) {
+			management.Use(adminAuthentication.RequireAdmin)
+			management.Post("/api/v1/knowledge/text", handlers.submitKnowledge)
+			management.Post("/api/v1/ingestion/url", handlers.submitURL)
+			management.Get("/api/v1/conversations", handlers.listConversations)
+		})
 	})
 
 	return router
@@ -544,9 +560,6 @@ func (h apiHandlers) listConversations(response http.ResponseWriter, request *ht
 		h.writeError(response, http.StatusForbidden, "workspace_not_allowed", "unknown workspace", requestID)
 		return
 	}
-	// TODO(auth): this management endpoint is temporarily open while authentication
-	// is absent. Require administrator permission before exposing it in production;
-	// ordinary visitors must never be allowed to enumerate workspace conversations.
 	summaries, err := h.conversation.ListConversations(request.Context(), h.scope.workspaceID)
 	if err != nil {
 		h.writeError(response, http.StatusInternalServerError, "internal_error", "could not load conversations", requestID)

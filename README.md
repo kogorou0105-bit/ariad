@@ -83,6 +83,7 @@ excludes frontend dependencies.
 | --- | --- | --- |
 | `ARIAD_API_ADDR` | `:8080` | Go API listen address |
 | `ARIAD_LOG_LEVEL` | `info` | API and Worker log level |
+| `ARIAD_ADMIN_TOKEN` | unset | Bearer token for management endpoints; unset rejects all management requests |
 | `ARIAD_CONVERSATION_HISTORY_TURN_LIMIT` | `5` | Recent turns included in model context |
 
 ## Product constraints

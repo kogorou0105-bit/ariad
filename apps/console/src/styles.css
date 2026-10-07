@@ -31,6 +31,14 @@ h1 { max-width: 760px; margin: 18px 0; font-family: Georgia, serif; font-size: c
 .page-header h1, .conversation-detail h1 { margin: 10px 0 0; font-size: clamp(38px, 5vw, 64px); }
 button { padding: 10px 16px; border: 1px solid #b8c1b9; border-radius: 8px; color: #22382d; background: #fff; font: inherit; cursor: pointer; }
 button:disabled { cursor: default; opacity: .6; }
+.login-page { display: grid; min-height: 100vh; padding: 24px; place-items: center; }
+.login-card { display: grid; width: min(440px, 100%); gap: 16px; padding: 38px; border: 1px solid #d7d5ca; border-radius: 16px; background: rgba(255,255,255,.74); box-shadow: 0 18px 55px rgba(31,48,38,.08); }
+.login-card .brand-mark { margin-bottom: 12px; color: #397150; }
+.login-card h1 { margin: 0; font-size: clamp(36px, 6vw, 54px); }
+.login-card p { margin: 0 0 10px; color: #5d6a62; line-height: 1.5; }
+.login-card label { font-size: 13px; font-weight: 700; }
+.login-card input { width: 100%; padding: 12px 14px; border: 1px solid #b8c1b9; border-radius: 8px; color: inherit; background: #fff; font: inherit; }
+.login-card button { color: #fff; border-color: #22382d; background: #22382d; }
 .conversation-list { overflow: hidden; border: 1px solid #d7d5ca; border-radius: 14px; background: rgba(255,255,255,.68); }
 .conversation-row { display: flex; justify-content: space-between; gap: 28px; padding: 20px 22px; border-bottom: 1px solid #deddd5; }
 .conversation-row:last-child { border-bottom: 0; }

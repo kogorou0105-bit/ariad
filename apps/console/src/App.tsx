@@ -5,14 +5,24 @@ import type {
 } from "@ariad/contracts";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, Outlet, useParams, useSearch } from "@tanstack/react-router";
+import { type FormEvent, useEffect, useState } from "react";
 
 import type { AppSurface } from "@ariad/contracts";
 
 const surface: AppSurface = "console";
 const workspaceID = "ws_dev";
+const adminTokenStorageKey = "ariad:admin_token";
+const adminUnauthorizedEvent = "ariad:admin-unauthorized";
 
 async function getJSON<Response>(path: string): Promise<Response> {
-  const response = await fetch(path);
+  const token = sessionStorage.getItem(adminTokenStorageKey);
+  const response = await fetch(path, {
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+  });
+  if (response.status === 401) {
+    sessionStorage.removeItem(adminTokenStorageKey);
+    window.dispatchEvent(new Event(adminUnauthorizedEvent));
+  }
   const responseText = await response.text();
   let payload: unknown;
   try {
@@ -32,6 +42,24 @@ function formatActivity(value: string): string {
 }
 
 export function ConsoleShell() {
+  const queryClient = useQueryClient();
+  const [authenticated, setAuthenticated] = useState(
+    () => sessionStorage.getItem(adminTokenStorageKey) !== null,
+  );
+
+  useEffect(() => {
+    const handleUnauthorized = () => {
+      queryClient.clear();
+      setAuthenticated(false);
+    };
+    window.addEventListener(adminUnauthorizedEvent, handleUnauthorized);
+    return () => window.removeEventListener(adminUnauthorizedEvent, handleUnauthorized);
+  }, [queryClient]);
+
+  if (!authenticated) {
+    return <AdminLoginPage onLogin={() => setAuthenticated(true)} />;
+  }
+
   return (
     <div className="console-shell">
       <aside className="sidebar">
@@ -52,6 +80,39 @@ export function ConsoleShell() {
         <Outlet />
       </main>
     </div>
+  );
+}
+
+function AdminLoginPage({ onLogin }: { onLogin: () => void }) {
+  const [token, setToken] = useState("");
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const trimmed = token.trim();
+    if (!trimmed) return;
+    sessionStorage.setItem(adminTokenStorageKey, trimmed);
+    onLogin();
+  }
+
+  return (
+    <main className="login-page" data-surface={surface}>
+      <form className="login-card" onSubmit={submit}>
+        <span className="brand-mark">A</span>
+        <div className="eyebrow">Ariad Console</div>
+        <h1>Administrator access</h1>
+        <p>Enter the management token configured for this Ariad server.</p>
+        <label htmlFor="admin-token">Management token</label>
+        <input
+          id="admin-token"
+          type="password"
+          autoComplete="current-password"
+          autoFocus
+          value={token}
+          onChange={(event) => setToken(event.target.value)}
+        />
+        <button type="submit" disabled={!token.trim()}>Continue</button>
+      </form>
+    </main>
   );
 }
 

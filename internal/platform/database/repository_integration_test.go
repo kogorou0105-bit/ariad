@@ -14,6 +14,7 @@ import (
 	"ariad/internal/conversation"
 	"ariad/internal/knowledge"
 	"ariad/internal/modelconfig"
+	"ariad/internal/review"
 	"ariad/internal/runtime"
 	"ariad/internal/usage"
 
@@ -27,6 +28,7 @@ func TestPostgresRepositories(t *testing.T) {
 	database := openTestDatabase(t)
 	knowledgeRepository := NewKnowledgeRepository(database)
 	conversationRepository := NewConversationRepository(database)
+	reviewRepository := NewReviewRepository(database)
 	modelConfigRepository, err := NewModelConfigRepository(database, base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32)))
 	if err != nil {
 		t.Fatalf("create model config repository: %v", err)
@@ -50,9 +52,54 @@ func TestPostgresRepositories(t *testing.T) {
 	t.Run("lists conversation summaries by recent activity", func(t *testing.T) {
 		testListConversations(t, conversationRepository)
 	})
+	t.Run("persists isolated review lifecycle", func(t *testing.T) {
+		testReviewLifecycle(t, conversationRepository, reviewRepository)
+	})
 	t.Run("encrypts and isolates workspace model configurations", func(t *testing.T) {
 		testWorkspaceModelConfigs(t, database, modelConfigRepository)
 	})
+}
+
+func testReviewLifecycle(t *testing.T, conversations *ConversationRepository, repository *ReviewRepository) {
+	t.Helper()
+	ctx := context.Background()
+	turn, fact := testTurn("review", "ws_review", "conv_review", "visitor_review")
+	turn.Message.Text = "Need a person"
+	if _, err := conversations.SaveTurn(ctx, "ws_review", "idem_review", "fingerprint_review", turn, fact); err != nil {
+		t.Fatal(err)
+	}
+	service := review.NewService(repository)
+	if _, err := service.Request(ctx, "ws_other", "conv_review", "visitor_review", "visitor_requested", "visitor"); !errors.Is(err, review.ErrConversationNotFound) {
+		t.Fatalf("cross workspace error = %v", err)
+	}
+	if _, err := service.Request(ctx, "ws_review", "conv_review", "visitor_review", "visitor_requested", "visitor"); err != nil {
+		t.Fatal(err)
+	}
+	items, err := service.ListPending(ctx, "ws_review")
+	if err != nil || len(items) != 1 || items[0].LastMessageText != "Need a person" {
+		t.Fatalf("items = %#v err = %v", items, err)
+	}
+	if _, err := service.Reply(ctx, "ws_review", "conv_review", "visitor_review", "admin", "Human response"); err != nil {
+		t.Fatal(err)
+	}
+	state, replies, err := service.Get(ctx, "ws_review", "conv_review", "visitor_review")
+	if err != nil || state.Status != "pending" || len(replies) != 1 || replies[0].AuthorID != "admin" {
+		t.Fatalf("state = %#v replies = %#v err = %v", state, replies, err)
+	}
+	if err := service.Resolve(ctx, "ws_review", "conv_review", "visitor_review", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	items, err = service.ListPending(ctx, "ws_review")
+	if err != nil || len(items) != 0 {
+		t.Fatalf("resolved queue = %#v err = %v", items, err)
+	}
+	if err := service.RecordConversationTurn(ctx, conversation.StateEvent{WorkspaceID: "ws_review", ConversationID: "conv_review", VisitorID: "visitor_review", Disposition: runtime.DispositionAnswered, OccurredAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	state, _, err = service.Get(ctx, "ws_review", "conv_review", "visitor_review")
+	if err != nil || state.Status != review.StatusOngoing {
+		t.Fatalf("reopened state = %#v err = %v", state, err)
+	}
 }
 
 func testWorkspaceModelConfigs(t *testing.T, database *sql.DB, repository *ModelConfigRepository) {

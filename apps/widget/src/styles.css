@@ -10,7 +10,7 @@
 body { margin: 0; min-width: 320px; min-height: 100vh; }
 button, input { font: inherit; }
 .preview { display: grid; min-height: 100vh; padding: 32px; place-items: center; background: radial-gradient(circle at 20% 10%, rgba(255, 255, 255, 0.9), transparent 34%), #e7e2d8; }
-.widget { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; width: min(100%, 430px); height: min(760px, calc(100vh - 64px)); min-height: 620px; overflow: hidden; border: 1px solid rgba(18, 45, 31, 0.16); border-radius: 24px; background: #fbfaf6; box-shadow: 0 24px 70px rgba(36, 45, 38, 0.18); }
+.widget { display: grid; grid-template-rows: auto minmax(0, 1fr) auto auto; width: min(100%, 430px); height: min(760px, calc(100vh - 64px)); min-height: 620px; overflow: hidden; border: 1px solid rgba(18, 45, 31, 0.16); border-radius: 24px; background: #fbfaf6; box-shadow: 0 24px 70px rgba(36, 45, 38, 0.18); }
 header { display: flex; gap: 12px; align-items: center; padding: 20px; color: #f4f3ec; background: #1d3429; }
 header div:last-child { display: grid; gap: 4px; }
 header span { color: #b7c9bd; font-size: 12px; }
@@ -30,6 +30,8 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 .message.muted { color: #7a867e; }
 .answer { margin-top: 12px; padding: 14px; border: 1px solid #dce4dc; border-radius: 4px 16px 16px; background: #fff; }
 .answer.refused { border-color: #e5d7cb; background: #fffaf5; }
+.human-answer { border-color: #b6cedf; background: #f1f7fb; }
+.handoff-status { padding: 12px 14px; border-radius: 10px; color: #684b18; background: #fff0c9; font-size: 13px; line-height: 1.45; }
 .answer p { margin: 8px 0 0; line-height: 1.55; }
 .disposition { display: inline-block; padding: 3px 7px; border-radius: 999px; color: #356148; background: #e4efe7; font-size: 10px; font-weight: 750; letter-spacing: 0.05em; text-transform: uppercase; }
 .refused .disposition { color: #855335; background: #f3e6da; }
@@ -39,6 +41,8 @@ blockquote { display: grid; gap: 5px; margin: 0; padding: 10px 12px; border-left
 cite { color: #28533b; font-style: normal; font-weight: 700; }
 .question-form { display: grid; grid-template-columns: 1fr auto; gap: 10px; padding: 16px; border-top: 1px solid #e8e7df; background: #fbfaf6; }
 .question-form button { width: 46px; }
+.handoff-action { padding: 0 16px 14px; text-align: center; }
+.handoff-action button { width: 100%; padding: 9px; color: #28533b; border: 1px solid #a9bcb0; background: transparent; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 
 @media (max-width: 480px) {

@@ -1,6 +1,6 @@
 import { createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
 
-import { ConsoleShell, ConversationDetailPage, ConversationsPage, ModelConfigPage, OverviewPage } from "./App";
+import { ConsoleShell, ConversationDetailPage, ConversationsPage, ModelConfigPage, OverviewPage, ReviewDetailPage, ReviewQueuePage } from "./App";
 
 const rootRoute = createRootRoute({ component: ConsoleShell });
 const indexRoute = createRoute({
@@ -22,7 +22,9 @@ const conversationDetailRoute = createRoute({
   component: ConversationDetailPage,
 });
 const modelConfigRoute = createRoute({ getParentRoute: () => rootRoute, path: "/settings/model", component: ModelConfigPage });
-const routeTree = rootRoute.addChildren([indexRoute, conversationsRoute, conversationDetailRoute, modelConfigRoute]);
+const reviewsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/reviews", component: ReviewQueuePage });
+const reviewDetailRoute = createRoute({ getParentRoute: () => rootRoute, path: "/reviews/$conversationId", validateSearch: (search: Record<string, unknown>) => ({ visitorId: typeof search.visitorId === "string" ? search.visitorId : "" }), component: ReviewDetailPage });
+const routeTree = rootRoute.addChildren([indexRoute, conversationsRoute, conversationDetailRoute, reviewsRoute, reviewDetailRoute, modelConfigRoute]);
 
 export const router = createRouter({ routeTree });
 

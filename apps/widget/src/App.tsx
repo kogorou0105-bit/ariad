@@ -4,6 +4,7 @@ import type {
   AppSurface,
   ConversationTurn,
   GetConversationHistoryResponse,
+  HandoffRequest,
   SubmitQuestionRequest,
   SubmitQuestionResponse,
 } from "@ariad/contracts";
@@ -86,7 +87,7 @@ function AnswerCard({
 }) {
   return (
     <article className={`answer ${disposition}`}>
-      <span className="disposition">{disposition}</span>
+      <span className="disposition">AI · {disposition}</span>
       <p>{answer}</p>
       {citations.length > 0 && (
         <div className="citations">
@@ -133,6 +134,21 @@ export function WidgetPreview() {
     },
   });
 
+  const handoffMutation = useMutation({
+    mutationFn: (request: HandoffRequest) => postJSON<HandoffRequest, { status: string }>(
+      `/api/v1/conversations/${encodeURIComponent(conversationID)}/handoff`, request,
+    ),
+    onMutate: async () => {
+      const key = ["conversation", workspaceID, currentVisitorID, conversationID];
+      await queryClient.cancelQueries({ queryKey: key });
+      const previous = queryClient.getQueryData<GetConversationHistoryResponse>(key);
+      if (previous) queryClient.setQueryData<GetConversationHistoryResponse>(key, { ...previous, status: "pending", handoff_reason: "visitor_requested" });
+      return { key, previous };
+    },
+    onError: (_error, _request, context) => { if (context?.previous) queryClient.setQueryData(context.key, context.previous); },
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ["conversation", workspaceID, currentVisitorID, conversationID] }),
+  });
+
   function submitQuestion(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const trimmed = question.trim();
@@ -154,6 +170,7 @@ export function WidgetPreview() {
 
   const answer = questionMutation.data;
   const turns = historyQuery.data?.turns ?? [];
+  const humanReplies = historyQuery.data?.human_replies ?? [];
   const answerAlreadyLoaded = turns.some((turn) => turn.answer_id === answer?.answer_id);
 
   return (
@@ -180,6 +197,9 @@ export function WidgetPreview() {
           {historyQuery.error && (
             <p className="notice error">{historyQuery.error.message}</p>
           )}
+          {historyQuery.data?.status === "pending" && (
+            <p className="handoff-status">You’re in the human support queue. A support specialist will reply here.</p>
+          )}
           {turns.map((turn) => (
             <div className="turn" key={turn.message_id}>
               <div className="message visitor">{turn.message}</div>
@@ -189,6 +209,12 @@ export function WidgetPreview() {
                 disposition={turn.terminal_disposition}
               />
             </div>
+          ))}
+          {humanReplies.map((reply) => (
+            <article className="answer human-answer" key={reply.reply_id}>
+              <span className="disposition">Human support</span>
+              <p>{reply.text}</p>
+            </article>
           ))}
           {questionMutation.isPending && submittedQuestion && (
             <>
@@ -228,6 +254,12 @@ export function WidgetPreview() {
             →
           </button>
         </form>
+        <div className="handoff-action">
+          <button type="button" disabled={!conversationID || handoffMutation.isPending || historyQuery.data?.status === "pending"} onClick={() => handoffMutation.mutate({ workspace_id: workspaceID, visitor_id: currentVisitorID, reason: "visitor_requested" })}>
+            {historyQuery.data?.status === "pending" ? "Waiting for human support" : handoffMutation.isPending ? "Requesting…" : "Talk to a human"}
+          </button>
+          {handoffMutation.error && <p className="notice error">{handoffMutation.error.message}</p>}
+        </div>
       </section>
     </main>
   );

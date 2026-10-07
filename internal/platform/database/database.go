@@ -37,16 +37,16 @@ func Open(ctx context.Context, databaseURL string) (*sql.DB, error) {
 
 // VerifySchemaReady fails fast when the configured database has not had its
 // migrations applied, instead of letting the first request return a runtime
-// error. It checks for one core table so it does not need the goose library.
+// error. It checks core tables without taking a dependency on goose.
 func VerifySchemaReady(ctx context.Context, database *sql.DB) error {
-	var table *string
+	var conversations, conversationStates *string
 	if err := database.QueryRowContext(
 		ctx,
-		"SELECT to_regclass('conversation_messages')",
-	).Scan(&table); err != nil {
+		"SELECT to_regclass('conversation_messages'), to_regclass('conversation_states')",
+	).Scan(&conversations, &conversationStates); err != nil {
 		return fmt.Errorf("check database schema: %w", err)
 	}
-	if table == nil || *table == "" {
+	if conversations == nil || *conversations == "" || conversationStates == nil || *conversationStates == "" {
 		return errors.New("database schema is not migrated; run 'make migrate-up' first")
 	}
 	return nil

@@ -75,6 +75,85 @@ func TestManagementEndpointsRequireAdminToken(t *testing.T) {
 	}
 }
 
+func TestHumanHandoffReviewReplyAndResolveFlow(t *testing.T) {
+	t.Parallel()
+	router := newRouterWithAdminToken(testLogger(), platformmodel.NewStub(), testAdminToken)
+	question := postJSONForTest(t, router, "/api/v1/questions", map[string]string{
+		"workspace_id": developmentWorkspaceID, "agent_id": developmentAgentID, "visitor_id": "visitor_review",
+		"channel": "widget", "locale": "en", "request_id": "req_review", "idempotency_key": "ik_review", "question": "I need help",
+	})
+	if question.Code != http.StatusOK {
+		t.Fatalf("question status = %d body = %s", question.Code, question.Body.String())
+	}
+	var answered submitQuestionResponse
+	if err := json.Unmarshal(question.Body.Bytes(), &answered); err != nil {
+		t.Fatal(err)
+	}
+	handoffPath := "/api/v1/conversations/" + answered.ConversationID + "/handoff"
+	handoff := postJSONForTest(t, router, handoffPath, map[string]string{"workspace_id": developmentWorkspaceID, "visitor_id": "visitor_review", "reason": "visitor_requested"})
+	if handoff.Code != http.StatusOK {
+		t.Fatalf("handoff status = %d body = %s", handoff.Code, handoff.Body.String())
+	}
+	crossVisitor := postJSONForTest(t, router, handoffPath, map[string]string{"workspace_id": developmentWorkspaceID, "visitor_id": "someone_else"})
+	if crossVisitor.Code != http.StatusNotFound {
+		t.Fatalf("cross visitor status = %d", crossVisitor.Code)
+	}
+	queuePath := "/api/v1/reviews?workspace_id=" + url.QueryEscape(developmentWorkspaceID)
+	if response := getForTest(t, router, queuePath); response.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized queue status = %d", response.Code)
+	}
+	if response := getAdminForTest(t, router, "/api/v1/reviews?workspace_id=other"); response.Code != http.StatusForbidden {
+		t.Fatalf("cross workspace queue status = %d", response.Code)
+	}
+	queue := getAdminForTest(t, router, queuePath)
+	if queue.Code != http.StatusOK || !strings.Contains(queue.Body.String(), "visitor_requested") || !strings.Contains(queue.Body.String(), "I need help") {
+		t.Fatalf("queue status = %d body = %s", queue.Code, queue.Body.String())
+	}
+	unauthorizedReply := postJSONForTest(t, router, "/api/v1/reviews/"+answered.ConversationID+"/replies", map[string]string{"workspace_id": developmentWorkspaceID, "visitor_id": "visitor_review", "text": "not allowed"})
+	if unauthorizedReply.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized reply status = %d", unauthorizedReply.Code)
+	}
+	crossWorkspaceReply := postAdminJSONForTest(t, router, "/api/v1/reviews/"+answered.ConversationID+"/replies", map[string]string{"workspace_id": "other", "visitor_id": "visitor_review", "text": "not allowed"})
+	if crossWorkspaceReply.Code != http.StatusForbidden {
+		t.Fatalf("cross workspace reply status = %d", crossWorkspaceReply.Code)
+	}
+	reply := postAdminJSONForTest(t, router, "/api/v1/reviews/"+answered.ConversationID+"/replies", map[string]string{"workspace_id": developmentWorkspaceID, "visitor_id": "visitor_review", "text": "A person is here."})
+	if reply.Code != http.StatusCreated || !strings.Contains(reply.Body.String(), `"source":"human"`) {
+		t.Fatalf("reply status = %d body = %s", reply.Code, reply.Body.String())
+	}
+	emptyReply := postAdminJSONForTest(t, router, "/api/v1/reviews/"+answered.ConversationID+"/replies", map[string]string{"workspace_id": developmentWorkspaceID, "visitor_id": "visitor_review", "text": "   "})
+	if emptyReply.Code != http.StatusBadRequest {
+		t.Fatalf("empty reply status = %d", emptyReply.Code)
+	}
+	history := getForTest(t, router, "/api/v1/conversations/"+answered.ConversationID+"?workspace_id="+developmentWorkspaceID+"&visitor_id=visitor_review")
+	if history.Code != http.StatusOK || !strings.Contains(history.Body.String(), "A person is here.") || !strings.Contains(history.Body.String(), `"status":"pending"`) {
+		t.Fatalf("history status = %d body = %s", history.Code, history.Body.String())
+	}
+	resolved := postAdminJSONForTest(t, router, "/api/v1/reviews/"+answered.ConversationID+"/resolve", map[string]string{"workspace_id": developmentWorkspaceID, "visitor_id": "visitor_review"})
+	if resolved.Code != http.StatusOK {
+		t.Fatalf("resolve status = %d body = %s", resolved.Code, resolved.Body.String())
+	}
+	resolvedReply := postAdminJSONForTest(t, router, "/api/v1/reviews/"+answered.ConversationID+"/replies", map[string]string{"workspace_id": developmentWorkspaceID, "visitor_id": "visitor_review", "text": "too late"})
+	if resolvedReply.Code != http.StatusConflict {
+		t.Fatalf("resolved reply status = %d", resolvedReply.Code)
+	}
+	queue = getAdminForTest(t, router, queuePath)
+	if !strings.Contains(queue.Body.String(), `"reviews":[]`) {
+		t.Fatalf("resolved queue body = %s", queue.Body.String())
+	}
+	followUp := postJSONForTest(t, router, "/api/v1/questions", map[string]string{
+		"workspace_id": developmentWorkspaceID, "agent_id": developmentAgentID, "conversation_id": answered.ConversationID, "visitor_id": "visitor_review",
+		"channel": "widget", "locale": "en", "request_id": "req_review_followup", "idempotency_key": "ik_review_followup", "question": "One more question",
+	})
+	if followUp.Code != http.StatusOK {
+		t.Fatalf("follow-up status = %d body = %s", followUp.Code, followUp.Body.String())
+	}
+	history = getForTest(t, router, "/api/v1/conversations/"+answered.ConversationID+"?workspace_id="+developmentWorkspaceID+"&visitor_id=visitor_review")
+	if !strings.Contains(history.Body.String(), `"status":"ongoing"`) {
+		t.Fatalf("follow-up did not reopen resolved conversation: %s", history.Body.String())
+	}
+}
+
 func TestModelConfigManagementFlowValidationAndIsolation(t *testing.T) {
 	t.Parallel()
 	router := newRouterWithAdminToken(testLogger(), platformmodel.NewStub(), testAdminToken)

@@ -23,6 +23,7 @@ var domainNames = map[string]struct{}{
 	"knowledge":    {},
 	"modelconfig":  {},
 	"retrieval":    {},
+	"review":       {},
 	"runtime":      {},
 	"tenant":       {},
 }

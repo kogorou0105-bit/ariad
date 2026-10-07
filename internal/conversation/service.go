@@ -159,12 +159,31 @@ type QuestionService interface {
 	HistoryReader
 }
 
+// StateEvent describes the conversation state impact of one persisted turn.
+type StateEvent struct {
+	WorkspaceID, ConversationID, VisitorID string
+	Disposition                            runtime.TerminalDisposition
+	OccurredAt                             time.Time
+}
+
+// StateRecorder receives durable state transitions after a turn is saved.
+// It is optional so the conversation service can be used without review capability.
+type StateRecorder interface {
+	RecordConversationTurn(ctx context.Context, event StateEvent) error
+}
+
 // Service owns the conversation write path, including usage recording.
 type Service struct {
-	repository   Repository
-	answerer     runtime.Answerer
-	historyLimit int
-	clock        func() time.Time
+	repository    Repository
+	answerer      runtime.Answerer
+	historyLimit  int
+	clock         func() time.Time
+	stateRecorder StateRecorder
+}
+
+// WithStateRecorder persists conversation state transitions emitted by the answer workflow.
+func WithStateRecorder(recorder StateRecorder) ServiceOption {
+	return func(service *Service) { service.stateRecorder = recorder }
 }
 
 // ServiceOption configures the conversation service.
@@ -260,6 +279,9 @@ func (s *Service) SubmitQuestion(
 	if found {
 		if previous.PayloadFingerprint != payloadFingerprint {
 			return Turn{}, ErrIdempotencyConflict
+		}
+		if err := s.recordConversationState(ctx, previous.Turn); err != nil {
+			return Turn{}, err
 		}
 		return previous.Turn, nil
 	}
@@ -398,7 +420,21 @@ func (s *Service) SubmitQuestion(
 	if err != nil {
 		return Turn{}, fmt.Errorf("save conversation turn: %w", err)
 	}
+	if err := s.recordConversationState(ctx, saved); err != nil {
+		return Turn{}, err
+	}
 	return saved, nil
+}
+
+func (s *Service) recordConversationState(ctx context.Context, turn Turn) error {
+	if s.stateRecorder == nil {
+		return nil
+	}
+	if err := s.stateRecorder.RecordConversationTurn(ctx, StateEvent{WorkspaceID: turn.Message.WorkspaceID, ConversationID: turn.Message.ConversationID, VisitorID: turn.Message.VisitorID, Disposition: turn.Answer.TerminalDisposition, OccurredAt: turn.Message.CreatedAt}); err != nil {
+		// The turn is already durable. Idempotent replay retries this transition.
+		return fmt.Errorf("record conversation state: %w", err)
+	}
+	return nil
 }
 
 func randomID(prefix string) (string, error) {

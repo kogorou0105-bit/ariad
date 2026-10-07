@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"ariad/internal/modelconfig"
 	"ariad/internal/runtime"
 )
 
@@ -31,6 +32,27 @@ type OpenAIConfig struct {
 	HTTPClient *http.Client
 }
 
+type EnvironmentSettings struct {
+	BaseURL string
+	Model   string
+	APIKey  string
+}
+
+func SettingsFromEnvironment() EnvironmentSettings {
+	settings := EnvironmentSettings{
+		BaseURL: strings.TrimSpace(os.Getenv("ARIAD_MODEL_BASE_URL")),
+		Model:   strings.TrimSpace(os.Getenv("ARIAD_MODEL_NAME")),
+		APIKey:  strings.TrimSpace(os.Getenv("ARIAD_MODEL_API_KEY")),
+	}
+	if settings.BaseURL == "" {
+		settings.BaseURL = defaultModelBaseURL
+	}
+	if settings.Model == "" {
+		settings.Model = defaultModelName
+	}
+	return settings
+}
+
 // OpenAI calls an OpenAI-compatible chat completions endpoint.
 type OpenAI struct {
 	endpoint   string
@@ -46,20 +68,39 @@ var _ runtime.Model = (*OpenAI)(nil)
 // otherwise creates an OpenAI-compatible adapter. Secrets are read only here
 // and are never included in errors or logs.
 func NewFromEnvironment() (runtime.Model, error) {
-	apiKey := strings.TrimSpace(os.Getenv("ARIAD_MODEL_API_KEY"))
-	if apiKey == "" {
+	settings := SettingsFromEnvironment()
+	if settings.APIKey == "" {
 		return NewStub(), nil
 	}
+	return NewOpenAI(OpenAIConfig{BaseURL: settings.BaseURL, APIKey: settings.APIKey, Model: settings.Model})
+}
 
-	baseURL := strings.TrimSpace(os.Getenv("ARIAD_MODEL_BASE_URL"))
-	if baseURL == "" {
-		baseURL = defaultModelBaseURL
+// WorkspaceModel resolves a workspace override for every request, so saves and resets take effect immediately.
+type WorkspaceModel struct {
+	configs  modelconfig.Reader
+	fallback runtime.Model
+}
+
+func NewWorkspaceModel(configs modelconfig.Reader, fallback runtime.Model) *WorkspaceModel {
+	return &WorkspaceModel{configs: configs, fallback: fallback}
+}
+
+func (m *WorkspaceModel) Generate(ctx context.Context, request runtime.ModelRequest) (runtime.ModelResponse, error) {
+	config, found, err := m.configs.Get(ctx, request.WorkspaceID)
+	if err != nil {
+		if errors.Is(err, modelconfig.ErrEncryptionDisabled) {
+			return m.fallback.Generate(ctx, request)
+		}
+		return runtime.ModelResponse{}, fmt.Errorf("resolve workspace model: %w", err)
 	}
-	modelName := strings.TrimSpace(os.Getenv("ARIAD_MODEL_NAME"))
-	if modelName == "" {
-		modelName = defaultModelName
+	if !found {
+		return m.fallback.Generate(ctx, request)
 	}
-	return NewOpenAI(OpenAIConfig{BaseURL: baseURL, APIKey: apiKey, Model: modelName})
+	adapter, err := NewOpenAI(OpenAIConfig{BaseURL: config.BaseURL, APIKey: config.APIKey, Model: config.Model})
+	if err != nil {
+		return runtime.ModelResponse{}, fmt.Errorf("configure workspace model: %w", err)
+	}
+	return adapter.Generate(ctx, request)
 }
 
 // NewOpenAI validates configuration and creates an OpenAI-compatible adapter.

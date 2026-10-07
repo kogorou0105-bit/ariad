@@ -92,3 +92,11 @@ type UsageFact struct {
 	Status           string    `db:"status" json:"status"`
 	OccurredAt       time.Time `db:"occurred_at" json:"occurred_at"`
 }
+
+type WorkspaceModelConfig struct {
+	WorkspaceID      string    `db:"workspace_id" json:"workspace_id"`
+	BaseUrl          string    `db:"base_url" json:"base_url"`
+	Model            string    `db:"model" json:"model"`
+	ApiKeyCiphertext string    `db:"api_key_ciphertext" json:"api_key_ciphertext"`
+	UpdatedAt        time.Time `db:"updated_at" json:"updated_at"`
+}

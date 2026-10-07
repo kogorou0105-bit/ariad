@@ -10,11 +10,13 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"ariad/internal/conversation"
 	"ariad/internal/ingestion"
 	"ariad/internal/knowledge"
+	"ariad/internal/modelconfig"
 	platformfetch "ariad/internal/platform/fetch"
 	platformmodel "ariad/internal/platform/model"
 )
@@ -70,6 +72,129 @@ func TestManagementEndpointsRequireAdminToken(t *testing.T) {
 	unconfigured := getForTest(t, newRouter(testLogger(), platformmodel.NewStub()), path)
 	if unconfigured.Code != http.StatusUnauthorized {
 		t.Fatalf("unconfigured status = %d, want %d", unconfigured.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestModelConfigManagementFlowValidationAndIsolation(t *testing.T) {
+	t.Parallel()
+	router := newRouterWithAdminToken(testLogger(), platformmodel.NewStub(), testAdminToken)
+	path := "/api/v1/model-config?workspace_id=" + url.QueryEscape(developmentWorkspaceID)
+	unauthorized := getForTest(t, router, path)
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized status = %d", unauthorized.Code)
+	}
+	crossWorkspace := adminRequestForTest(t, router, http.MethodGet, "/api/v1/model-config?workspace_id=ws_other", nil)
+	if crossWorkspace.Code != http.StatusForbidden {
+		t.Fatalf("cross-workspace status = %d", crossWorkspace.Code)
+	}
+
+	for _, test := range []struct {
+		name    string
+		payload map[string]string
+		message string
+	}{
+		{name: "invalid URL", payload: map[string]string{"workspace_id": developmentWorkspaceID, "base_url": "://bad", "model": "m", "api_key": "secret"}, message: "base URL"},
+		{name: "missing model", payload: map[string]string{"workspace_id": developmentWorkspaceID, "base_url": "https://model.example", "api_key": "secret"}, message: "model name"},
+		{name: "missing first key", payload: map[string]string{"workspace_id": developmentWorkspaceID, "base_url": "https://model.example", "model": "m"}, message: "API key"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := adminRequestForTest(t, router, http.MethodPut, path, test.payload)
+			if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), test.message) {
+				t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+			}
+		})
+	}
+	secret := "super-secret-workspace-key"
+	saved := adminRequestForTest(t, router, http.MethodPut, path, map[string]string{"workspace_id": developmentWorkspaceID, "base_url": "https://model.example/v1/", "model": "custom-model", "api_key": secret})
+	if saved.Code != http.StatusOK || strings.Contains(saved.Body.String(), secret) {
+		t.Fatalf("save status = %d, body leaked = %s", saved.Code, saved.Body.String())
+	}
+	updated := adminRequestForTest(t, router, http.MethodPut, path, map[string]string{"workspace_id": developmentWorkspaceID, "base_url": "https://new.example", "model": "new-model", "api_key": ""})
+	if updated.Code != http.StatusOK || strings.Contains(updated.Body.String(), secret) {
+		t.Fatalf("update status = %d, body = %s", updated.Code, updated.Body.String())
+	}
+	reset := adminRequestForTest(t, router, http.MethodDelete, path, nil)
+	if reset.Code != http.StatusOK {
+		t.Fatalf("reset status = %d, body = %s", reset.Code, reset.Body.String())
+	}
+	var status modelConfigResponse
+	if err := json.Unmarshal(reset.Body.Bytes(), &status); err != nil {
+		t.Fatalf("decode reset: %v", err)
+	}
+	if status.Source != "local" {
+		t.Fatalf("reset status = %#v", status)
+	}
+}
+
+func TestSavedModelConfigImmediatelyDrivesVisitorAnswersAndResetRestoresFallback(t *testing.T) {
+	t.Parallel()
+	var calls atomic.Int32
+	var authorization string
+	modelServer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		calls.Add(1)
+		authorization = request.Header.Get("Authorization")
+		var payload struct {
+			Messages []struct {
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Errorf("decode model request: %v", err)
+			response.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		content := payload.Messages[len(payload.Messages)-1].Content
+		start := strings.Index(content, "[ev_")
+		if start < 0 {
+			t.Errorf("evidence ID missing from prompt")
+			response.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		end := strings.Index(content[start:], "]")
+		if end < 0 {
+			t.Errorf("evidence ID missing from prompt")
+			response.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		evidenceID := content[start+1 : start+end]
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(response, `{"model":"byok-model","choices":[{"message":{"content":"BYOK answer.\nCITATIONS: %s"}}]}`, evidenceID)
+	}))
+	defer modelServer.Close()
+
+	configs := modelconfig.NewMemoryRepository()
+	router := newRouterWithRepositoriesAndModelConfig(
+		testLogger(), platformmodel.NewStub(), knowledge.NewMemoryRepository(), conversation.NewMemoryRepository(),
+		platformfetch.NewHTTPFetcher(), 0, testAdminToken, configs, modelconfig.Config{Model: "grounded-v1"},
+	)
+	configPath := "/api/v1/model-config?workspace_id=" + url.QueryEscape(developmentWorkspaceID)
+	saved := adminRequestForTest(t, router, http.MethodPut, configPath, map[string]string{
+		"workspace_id": developmentWorkspaceID, "base_url": modelServer.URL, "model": "byok-model", "api_key": "byok-secret",
+	})
+	if saved.Code != http.StatusOK {
+		t.Fatalf("save config status = %d, body = %s", saved.Code, saved.Body.String())
+	}
+	knowledgeResponse := postAdminJSONForTest(t, router, "/api/v1/knowledge/text", map[string]string{
+		"workspace_id": developmentWorkspaceID, "request_id": "req_byok_knowledge", "idempotency_key": "ik_byok_knowledge", "title": "Policy", "text": "BYOK evidence.",
+	})
+	if knowledgeResponse.Code != http.StatusCreated {
+		t.Fatalf("knowledge status = %d", knowledgeResponse.Code)
+	}
+	question := postJSONForTest(t, router, "/api/v1/questions", map[string]string{
+		"workspace_id": developmentWorkspaceID, "agent_id": developmentAgentID, "visitor_id": "visitor_byok", "channel": "widget", "locale": "en", "request_id": "req_byok", "idempotency_key": "ik_byok", "question": "Use BYOK",
+	})
+	if question.Code != http.StatusOK || authorization != "Bearer byok-secret" || calls.Load() != 1 {
+		t.Fatalf("question status = %d, authorization = %q, calls = %d, body = %s", question.Code, authorization, calls.Load(), question.Body.String())
+	}
+	reset := adminRequestForTest(t, router, http.MethodDelete, configPath, nil)
+	if reset.Code != http.StatusOK {
+		t.Fatalf("reset status = %d", reset.Code)
+	}
+	fallbackQuestion := postJSONForTest(t, router, "/api/v1/questions", map[string]string{
+		"workspace_id": developmentWorkspaceID, "agent_id": developmentAgentID, "visitor_id": "visitor_fallback", "channel": "widget", "locale": "en", "request_id": "req_fallback", "idempotency_key": "ik_fallback", "question": "Use fallback",
+	})
+	if fallbackQuestion.Code != http.StatusOK || calls.Load() != 1 {
+		t.Fatalf("fallback status = %d, calls = %d", fallbackQuestion.Code, calls.Load())
 	}
 }
 
@@ -555,6 +680,28 @@ func getAdminForTest(t *testing.T, handler http.Handler, path string) *httptest.
 	t.Helper()
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, path, nil)
 	request.Header.Set("Authorization", "Bearer "+testAdminToken)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return response
+}
+
+func adminRequestForTest(t *testing.T, handler http.Handler, method, path string, payload map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
+	var body *bytes.Reader
+	if payload == nil {
+		body = bytes.NewReader(nil)
+	} else {
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatalf("encode request: %v", err)
+		}
+		body = bytes.NewReader(encoded)
+	}
+	request := httptest.NewRequestWithContext(context.Background(), method, path, body)
+	request.Header.Set("Authorization", "Bearer "+testAdminToken)
+	if payload != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	return response

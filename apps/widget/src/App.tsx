@@ -7,9 +7,10 @@ import type {
   HandoffRequest,
   SubmitQuestionRequest,
   SubmitQuestionResponse,
+  VisitorSessionResponse,
 } from "@ariad/contracts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useEffect, useState } from "react";
 
 const surface: AppSurface = "widget";
 const workspaceID = "ws_dev";
@@ -19,23 +20,27 @@ function createID(prefix: string): string {
   return `${prefix}_${crypto.randomUUID()}`;
 }
 
-function visitorID(): string {
-  const storageKey = "ariad:visitor_id";
-  const existing = sessionStorage.getItem(storageKey);
-  if (existing) return existing;
-  const created = createID("visitor");
-  sessionStorage.setItem(storageKey, created);
-  return created;
+const visitorTokenKey = "ariad:visitor_session_token";
+const visitorIDKey = "ariad:visitor_id";
+const visitorRefreshTokenKey = "ariad:visitor_refresh_token";
+const conversationSnapshotKey = "ariad:conversation_snapshot";
+
+function storedConversationSnapshot(): GetConversationHistoryResponse | null {
+  const value = localStorage.getItem(conversationSnapshotKey);
+  if (!value) return null;
+  try { return JSON.parse(value) as GetConversationHistoryResponse; } catch { localStorage.removeItem(conversationSnapshotKey); return null; }
 }
 
 function storedConversationID(): string {
   return sessionStorage.getItem("ariad:conversation_id") ?? "";
 }
 
-async function postJSON<Request, Response>(path: string, body: Request): Promise<Response> {
+class VisitorAPIError extends Error { constructor(message: string, readonly code: string) { super(message); } }
+
+async function postJSON<Request, Response>(path: string, body: Request, token?: string): Promise<Response> {
   const response = await fetch(path, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
     body: JSON.stringify(body),
   });
   const responseText = await response.text();
@@ -51,13 +56,13 @@ async function postJSON<Request, Response>(path: string, body: Request): Promise
   }
   if (!response.ok) {
     const failure = payload as APIErrorResponse;
-    throw new Error(failure.error?.message ?? `Request failed (${response.status})`);
+    throw new VisitorAPIError(failure.error?.message ?? `Request failed (${response.status})`, failure.error?.code ?? "request_failed");
   }
   return payload as Response;
 }
 
-async function getJSON<Response>(path: string): Promise<Response> {
-  const response = await fetch(path);
+async function getJSON<Response>(path: string, token: string): Promise<Response> {
+  const response = await fetch(path, { headers: { Authorization: `Bearer ${token}` } });
   const responseText = await response.text();
   let payload: unknown;
   try {
@@ -71,7 +76,7 @@ async function getJSON<Response>(path: string): Promise<Response> {
   }
   if (!response.ok) {
     const failure = payload as APIErrorResponse;
-    throw new Error(failure.error?.message ?? `Request failed (${response.status})`);
+    throw new VisitorAPIError(failure.error?.message ?? `Request failed (${response.status})`, failure.error?.code ?? "request_failed");
   }
   return payload as Response;
 }
@@ -109,34 +114,73 @@ export function WidgetPreview() {
   const [question, setQuestion] = useState("");
   const [submittedQuestion, setSubmittedQuestion] = useState("");
   const [conversationID, setConversationID] = useState(storedConversationID);
-  const [currentVisitorID] = useState(visitorID);
+  const [visitorToken, setVisitorToken] = useState(() => localStorage.getItem(visitorTokenKey) ?? "");
+  const [visitorRefreshToken, setVisitorRefreshToken] = useState(() => localStorage.getItem(visitorRefreshTokenKey) ?? "");
+  const [currentVisitorID, setCurrentVisitorID] = useState(() => localStorage.getItem(visitorIDKey) ?? "");
+  const [preservedHistory, setPreservedHistory] = useState<GetConversationHistoryResponse | null>(storedConversationSnapshot);
+
+  const sessionMutation = useMutation({
+    mutationFn: () => visitorRefreshToken
+      ? postJSON<{ workspace_id: string; refresh_token: string }, VisitorSessionResponse>("/api/v1/visitor/sessions/refresh", { workspace_id: workspaceID, refresh_token: visitorRefreshToken })
+      : postJSON<{ workspace_id: string }, VisitorSessionResponse>("/api/v1/visitor/sessions", { workspace_id: workspaceID }),
+    onSuccess: (session) => {
+	  const createdIdentity = visitorRefreshToken === "";
+      localStorage.setItem(visitorTokenKey, session.token);
+      localStorage.setItem(visitorIDKey, session.visitor_id);
+      if (session.refresh_token) {
+        localStorage.setItem(visitorRefreshTokenKey, session.refresh_token);
+        setVisitorRefreshToken(session.refresh_token);
+		if (createdIdentity) {
+		  sessionStorage.removeItem("ariad:conversation_id");
+		  setConversationID("");
+		}
+      }
+      setVisitorToken(session.token); setCurrentVisitorID(session.visitor_id);
+    },
+    onError: (error) => {
+      if (error instanceof VisitorAPIError && error.code === "visitor_refresh_invalid") {
+        localStorage.removeItem(visitorRefreshTokenKey); localStorage.removeItem(visitorIDKey); setVisitorRefreshToken(""); setCurrentVisitorID("");
+      }
+    },
+  });
+
+  useEffect(() => { if (!visitorToken && !sessionMutation.isPending) sessionMutation.mutate(); }, [visitorToken, sessionMutation]);
+
+  function renewVisitorSession(error: Error | null, history?: GetConversationHistoryResponse) {
+    if (!(error instanceof VisitorAPIError) || !["visitor_session_invalid", "visitor_session_expired"].includes(error.code)) return;
+    if (history) setPreservedHistory(history);
+    localStorage.removeItem(visitorTokenKey); setVisitorToken("");
+  }
 
   const historyQuery = useQuery({
     queryKey: ["conversation", workspaceID, currentVisitorID, conversationID],
-    queryFn: () =>
-      getJSON<GetConversationHistoryResponse>(
-        `/api/v1/conversations/${encodeURIComponent(conversationID)}` +
-          `?workspace_id=${encodeURIComponent(workspaceID)}` +
-          `&visitor_id=${encodeURIComponent(currentVisitorID)}`,
-      ),
-    enabled: conversationID !== "",
+    queryFn: async () => {
+      try { const history = await getJSON<GetConversationHistoryResponse>(
+        `/api/v1/conversations/${encodeURIComponent(conversationID)}?workspace_id=${encodeURIComponent(workspaceID)}`,
+        visitorToken,
+      ); localStorage.setItem(conversationSnapshotKey, JSON.stringify(history)); return history; } catch (error) { renewVisitorSession(error as Error, queryClient.getQueryData<GetConversationHistoryResponse>(["conversation", workspaceID, currentVisitorID, conversationID]) ?? preservedHistory ?? undefined); throw error; }
+    },
+    enabled: conversationID !== "" && visitorToken !== "",
   });
 
   const questionMutation = useMutation({
     mutationFn: (request: SubmitQuestionRequest) =>
-      postJSON<SubmitQuestionRequest, SubmitQuestionResponse>("/api/v1/questions", request),
+      postJSON<SubmitQuestionRequest, SubmitQuestionResponse>("/api/v1/questions", request, visitorToken),
     onSuccess: (response) => {
       sessionStorage.setItem("ariad:conversation_id", response.conversation_id);
       setConversationID(response.conversation_id);
+      setPreservedHistory(null);
+      localStorage.removeItem(conversationSnapshotKey);
       void queryClient.invalidateQueries({
         queryKey: ["conversation", workspaceID, currentVisitorID, response.conversation_id],
       });
     },
+    onError: (error) => renewVisitorSession(error),
   });
 
   const handoffMutation = useMutation({
     mutationFn: (request: HandoffRequest) => postJSON<HandoffRequest, { status: string }>(
-      `/api/v1/conversations/${encodeURIComponent(conversationID)}/handoff`, request,
+      `/api/v1/conversations/${encodeURIComponent(conversationID)}/handoff`, request, visitorToken,
     ),
     onMutate: async () => {
       const key = ["conversation", workspaceID, currentVisitorID, conversationID];
@@ -145,7 +189,7 @@ export function WidgetPreview() {
       if (previous) queryClient.setQueryData<GetConversationHistoryResponse>(key, { ...previous, status: "pending", handoff_reason: "visitor_requested" });
       return { key, previous };
     },
-    onError: (_error, _request, context) => { if (context?.previous) queryClient.setQueryData(context.key, context.previous); },
+    onError: (error, _request, context) => { if (context?.previous) queryClient.setQueryData(context.key, context.previous); renewVisitorSession(error); },
     onSettled: () => queryClient.invalidateQueries({ queryKey: ["conversation", workspaceID, currentVisitorID, conversationID] }),
   });
 
@@ -158,7 +202,6 @@ export function WidgetPreview() {
       workspace_id: workspaceID,
       agent_id: agentID,
       conversation_id: conversationID,
-      visitor_id: currentVisitorID,
       channel: "widget",
       locale: navigator.language || "en",
       request_id: createID("req"),
@@ -169,8 +212,9 @@ export function WidgetPreview() {
   }
 
   const answer = questionMutation.data;
-  const turns = historyQuery.data?.turns ?? [];
-  const humanReplies = historyQuery.data?.human_replies ?? [];
+  const visibleHistory = historyQuery.data ?? preservedHistory;
+  const turns = visibleHistory?.turns ?? [];
+  const humanReplies = visibleHistory?.human_replies ?? [];
   const answerAlreadyLoaded = turns.some((turn) => turn.answer_id === answer?.answer_id);
 
   return (
@@ -197,7 +241,7 @@ export function WidgetPreview() {
           {historyQuery.error && (
             <p className="notice error">{historyQuery.error.message}</p>
           )}
-          {historyQuery.data?.status === "pending" && (
+          {visibleHistory?.status === "pending" && (
             <p className="handoff-status">You’re in the human support queue. A support specialist will reply here.</p>
           )}
           {turns.map((turn) => (
@@ -255,8 +299,8 @@ export function WidgetPreview() {
           </button>
         </form>
         <div className="handoff-action">
-          <button type="button" disabled={!conversationID || handoffMutation.isPending || historyQuery.data?.status === "pending"} onClick={() => handoffMutation.mutate({ workspace_id: workspaceID, visitor_id: currentVisitorID, reason: "visitor_requested" })}>
-            {historyQuery.data?.status === "pending" ? "Waiting for human support" : handoffMutation.isPending ? "Requesting…" : "Talk to a human"}
+          <button type="button" disabled={!conversationID || !visitorToken || handoffMutation.isPending || visibleHistory?.status === "pending"} onClick={() => handoffMutation.mutate({ workspace_id: workspaceID, reason: "visitor_requested" })}>
+            {visibleHistory?.status === "pending" ? "Waiting for human support" : handoffMutation.isPending ? "Requesting…" : "Talk to a human"}
           </button>
           {handoffMutation.error && <p className="notice error">{handoffMutation.error.message}</p>}
         </div>

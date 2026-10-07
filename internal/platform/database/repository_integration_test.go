@@ -357,6 +357,7 @@ func testWorkspaceIsolation(
 		ID:          "src_isolation",
 		WorkspaceID: "ws_isolation_a",
 		Title:       "Isolation source",
+		Type:        "text",
 		Status:      "ready",
 		CreatedAt:   time.Now().UTC(),
 	}
@@ -442,6 +443,7 @@ func testIdempotentReplay(
 		WorkspaceID: "ws_replay",
 		Title:       "Replay source",
 		SourceURL:   "https://example.com/replay",
+		Type:        "url",
 		Status:      "ready",
 		CreatedAt:   time.Now().UTC(),
 	}

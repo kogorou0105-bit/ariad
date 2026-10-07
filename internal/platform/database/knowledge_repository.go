@@ -47,6 +47,9 @@ func (r *KnowledgeRepository) SaveSource(
 	if source.Status == "" {
 		source.Status = "ready"
 	}
+	if source.Type == "" {
+		source.Type = "text"
+	}
 	if err := validateKnowledgeWrite(workspaceID, idempotencyKey, payloadFingerprint, source, chunks); err != nil {
 		return knowledge.SubmitTextResult{}, err
 	}

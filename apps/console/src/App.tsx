@@ -7,6 +7,11 @@ import type {
   SaveModelConfigRequest,
   ReviewReplyRequest,
   ResolveReviewRequest,
+  AdministratorCredentialsRequest,
+  AdministratorLoginResponse,
+  AdministratorSummary,
+  ListAdministratorsResponse,
+  ChangeAdministratorPasswordRequest,
 } from "@ariad/contracts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, Outlet, useParams, useSearch } from "@tanstack/react-router";
@@ -16,7 +21,8 @@ import type { AppSurface } from "@ariad/contracts";
 
 const surface: AppSurface = "console";
 const workspaceID = "ws_dev";
-const adminTokenStorageKey = "ariad:admin_token";
+const adminTokenStorageKey = "ariad:admin_session";
+const administratorIDStorageKey = "ariad:administrator_id";
 const adminUnauthorizedEvent = "ariad:admin-unauthorized";
 
 async function requestJSON<Response>(
@@ -33,6 +39,7 @@ async function requestJSON<Response>(
   });
   if (response.status === 401 && clearTokenOnUnauthorized) {
     sessionStorage.removeItem(adminTokenStorageKey);
+    sessionStorage.removeItem(administratorIDStorageKey);
     window.dispatchEvent(new Event(adminUnauthorizedEvent));
   }
   const responseText = await response.text();
@@ -84,10 +91,13 @@ export function ConsoleShell() {
     return <AdminLoginPage onLogin={() => setAuthenticated(true)} />;
   }
 
-  function logout() {
-    sessionStorage.removeItem(adminTokenStorageKey);
-    queryClient.clear();
-    setAuthenticated(false);
+  async function logout() {
+    try { await sendJSON<never, { logged_out: boolean }>("/api/v1/admin/logout", "POST"); } finally {
+      sessionStorage.removeItem(adminTokenStorageKey);
+      sessionStorage.removeItem(administratorIDStorageKey);
+      queryClient.clear();
+      setAuthenticated(false);
+    }
   }
 
   return (
@@ -105,9 +115,10 @@ export function ConsoleShell() {
           <Link className="nav-item" activeProps={{ className: "nav-item nav-item-active" }} to="/conversations">Conversations</Link>
           <Link className="nav-item" activeProps={{ className: "nav-item nav-item-active" }} to="/reviews">Review queue</Link>
           <Link className="nav-item" activeProps={{ className: "nav-item nav-item-active" }} to="/settings/model">Model configuration</Link>
+          <Link className="nav-item" activeProps={{ className: "nav-item nav-item-active" }} to="/settings/administrators">Administrators</Link>
           <span className="nav-item nav-item-disabled">Evaluations</span>
         </nav>
-        <button className="logout-button" type="button" onClick={logout}>Log out</button>
+        <button className="logout-button" type="button" onClick={() => void logout()}>Log out</button>
       </aside>
       <main className="main-content" data-surface={surface}>
         <Outlet />
@@ -185,23 +196,21 @@ function ModelConfigEditor({ config, path }: { config: ModelConfigResponse; path
 }
 
 function AdminLoginPage({ onLogin }: { onLogin: () => void }) {
-  const [token, setToken] = useState("");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const trimmed = token.trim();
-    if (!trimmed) return;
+    const trimmed = username.trim();
+    if (!trimmed || !password) return;
     setError("");
     setPending(true);
     try {
-      await requestJSON<ListConversationsResponse>(
-        `/api/v1/conversations?workspace_id=${encodeURIComponent(workspaceID)}`,
-        trimmed,
-        false,
-      );
-      sessionStorage.setItem(adminTokenStorageKey, trimmed);
+      const login = await requestJSON<AdministratorLoginResponse>("/api/v1/admin/login", null, false, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: trimmed, password } satisfies AdministratorCredentialsRequest) });
+      sessionStorage.setItem(adminTokenStorageKey, login.token);
+      sessionStorage.setItem(administratorIDStorageKey, login.administrator.administrator_id);
       onLogin();
     } catch (loginError) {
       setError(loginError instanceof Error ? loginError.message : "Could not sign in.");
@@ -216,23 +225,39 @@ function AdminLoginPage({ onLogin }: { onLogin: () => void }) {
         <span className="brand-mark">A</span>
         <div className="eyebrow">Ariad Console</div>
         <h1>Administrator access</h1>
-        <p>Enter the management token configured for this Ariad server.</p>
-        <label htmlFor="admin-token">Management token</label>
+        <p>Sign in with your administrator account. On first startup, find the generated admin password in the API startup log.</p>
+        <label htmlFor="admin-username">Username</label>
         <input
-          id="admin-token"
-          type="password"
-          autoComplete="current-password"
+          id="admin-username"
+          autoComplete="username"
           autoFocus
-          value={token}
-          onChange={(event) => setToken(event.target.value)}
+          value={username}
+          onChange={(event) => setUsername(event.target.value)}
         />
+        <label htmlFor="admin-password">Password</label>
+        <input id="admin-password" type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} />
         {error && <p className="login-error" role="alert">{error}</p>}
-        <button type="submit" disabled={pending || !token.trim()}>
+        <button type="submit" disabled={pending || !username.trim() || !password}>
           {pending ? "Checking…" : "Continue"}
         </button>
       </form>
     </main>
   );
+}
+
+export function AdministratorsPage() {
+  const queryClient = useQueryClient();
+  const currentAdministratorID = sessionStorage.getItem(administratorIDStorageKey);
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+	const [currentPassword, setCurrentPassword] = useState("");
+	const [newPassword, setNewPassword] = useState("");
+  const [created, setCreated] = useState<AdministratorSummary | null>(null);
+	const administratorsQuery = useQuery({ queryKey: ["administrators"], queryFn: () => getJSON<ListAdministratorsResponse>("/api/v1/admin/accounts") });
+	const mutation = useMutation({ mutationFn: (body: AdministratorCredentialsRequest) => sendJSON<AdministratorCredentialsRequest, AdministratorSummary>("/api/v1/admin/accounts", "POST", body), onSuccess: (administrator) => { setCreated(administrator); setUsername(""); setPassword(""); void queryClient.invalidateQueries({ queryKey: ["administrators"] }); } });
+	const deleteMutation = useMutation({ mutationFn: (administratorID: string) => sendJSON<never, { deleted: boolean }>(`/api/v1/admin/accounts/${encodeURIComponent(administratorID)}`, "DELETE"), onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["administrators"] }) });
+	const passwordMutation = useMutation({ mutationFn: (body: ChangeAdministratorPasswordRequest) => sendJSON<ChangeAdministratorPasswordRequest, { password_changed: boolean }>("/api/v1/admin/password", "POST", body), onSuccess: () => { sessionStorage.removeItem(adminTokenStorageKey); sessionStorage.removeItem(administratorIDStorageKey); window.dispatchEvent(new Event(adminUnauthorizedEvent)); } });
+	return <section className="model-config-page"><div className="eyebrow">Workspace / Settings</div><h1>Administrators</h1><p className="lede">Create a separate account for each person who manages Ariad.</p>{administratorsQuery.isPending ? <p className="empty-state">Loading administrators…</p> : <div className="conversation-list">{administratorsQuery.data?.administrators.map((administrator) => <div className="conversation-row" key={administrator.administrator_id}><strong>{administrator.username}{administrator.administrator_id === currentAdministratorID ? " (you)" : ""}</strong><button type="button" disabled={administrator.administrator_id === currentAdministratorID || deleteMutation.isPending} onClick={() => deleteMutation.mutate(administrator.administrator_id)}>Delete</button></div>)}</div>}<form className="model-config-form" onSubmit={(event) => { event.preventDefault(); setCreated(null); mutation.mutate({ username, password }); }}><h2>Create administrator</h2><label htmlFor="new-admin-username">Username</label><input id="new-admin-username" autoComplete="off" required value={username} onChange={(event) => setUsername(event.target.value)} /><label htmlFor="new-admin-password">Initial password</label><input id="new-admin-password" type="password" minLength={12} autoComplete="new-password" required value={password} onChange={(event) => setPassword(event.target.value)} /><button type="submit" disabled={mutation.isPending}>{mutation.isPending ? "Creating…" : "Create administrator"}</button></form>{created && <p className="notice success">Administrator {created.username} created.</p>}<form className="model-config-form" onSubmit={(event) => { event.preventDefault(); passwordMutation.mutate({ current_password: currentPassword, new_password: newPassword }); }}><h2>Change my password</h2><label htmlFor="current-admin-password">Current password</label><input id="current-admin-password" type="password" autoComplete="current-password" required value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} /><label htmlFor="changed-admin-password">New password</label><input id="changed-admin-password" type="password" minLength={12} autoComplete="new-password" required value={newPassword} onChange={(event) => setNewPassword(event.target.value)} /><button type="submit" disabled={passwordMutation.isPending}>Change password and sign out</button></form>{(mutation.error || deleteMutation.error || passwordMutation.error || administratorsQuery.error) && <p className="notice error">{(mutation.error ?? deleteMutation.error ?? passwordMutation.error ?? administratorsQuery.error)?.message}</p>}</section>;
 }
 
 export function ConversationsPage() {

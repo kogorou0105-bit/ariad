@@ -39,6 +39,44 @@ func TestPostgresRepositories(t *testing.T) {
 	t.Run("lists recent turns in chronological order", func(t *testing.T) {
 		testListConversationTurns(t, conversationRepository)
 	})
+	t.Run("lists conversation summaries by recent activity", func(t *testing.T) {
+		testListConversations(t, conversationRepository)
+	})
+}
+
+func testListConversations(t *testing.T, repository *ConversationRepository) {
+	t.Helper()
+	ctx := context.Background()
+	baseTime := time.Date(2026, time.October, 7, 9, 0, 0, 0, time.UTC)
+	inputs := []struct {
+		suffix, workspace, conversationID, visitorID, text string
+		offset                                             time.Duration
+	}{
+		{"list_old_one", "ws_list", "conv_list_old", "visitor_old", "First old", 0},
+		{"list_old_two", "ws_list", "conv_list_old", "visitor_old", "Latest old", time.Minute},
+		{"list_new", "ws_list", "conv_list_new", "visitor_new", "Newest", 2 * time.Minute},
+		{"list_hidden", "ws_list_other", "conv_list_hidden", "visitor_hidden", "Hidden", 3 * time.Minute},
+	}
+	for _, input := range inputs {
+		turn, fact := testTurn(input.suffix, input.workspace, input.conversationID, input.visitorID)
+		turn.Message.Text = input.text
+		turn.Message.CreatedAt = baseTime.Add(input.offset)
+		turn.Answer.CreatedAt = baseTime.Add(input.offset)
+		fact.OccurredAt = baseTime.Add(input.offset)
+		if _, err := repository.SaveTurn(ctx, input.workspace, "idem_"+input.suffix, "fingerprint_"+input.suffix, turn, fact); err != nil {
+			t.Fatalf("save %s: %v", input.suffix, err)
+		}
+	}
+	summaries, err := repository.ListConversations(ctx, "ws_list")
+	if err != nil {
+		t.Fatalf("list conversations: %v", err)
+	}
+	if len(summaries) != 2 || summaries[0].ConversationID != "conv_list_new" || summaries[1].ConversationID != "conv_list_old" {
+		t.Fatalf("summaries = %#v", summaries)
+	}
+	if summaries[1].MessageCount != 2 || summaries[1].LastMessageText != "Latest old" || !summaries[1].LastActivityAt.Equal(baseTime.Add(time.Minute)) {
+		t.Fatalf("old summary = %#v", summaries[1])
+	}
 }
 
 func testListConversationTurns(t *testing.T, repository *ConversationRepository) {

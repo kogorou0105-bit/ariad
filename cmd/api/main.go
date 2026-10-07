@@ -206,6 +206,7 @@ func newRouterWithServices(
 		bounded.Post("/api/v1/knowledge/text", handlers.submitKnowledge)
 		bounded.Post("/api/v1/ingestion/url", handlers.submitURL)
 		bounded.Post("/api/v1/questions", handlers.submitQuestion)
+		bounded.Get("/api/v1/conversations", handlers.listConversations)
 		bounded.Get("/api/v1/conversations/{conversation_id}", handlers.listConversationTurns)
 	})
 
@@ -407,6 +408,19 @@ type listConversationTurnsResponse struct {
 	Turns          []conversationTurnResponse `json:"turns"`
 }
 
+type conversationSummaryResponse struct {
+	ConversationID  string    `json:"conversation_id"`
+	VisitorID       string    `json:"visitor_id"`
+	MessageCount    int64     `json:"message_count"`
+	LastActivityAt  time.Time `json:"last_activity_at"`
+	LastMessageText string    `json:"last_message_text"`
+}
+
+type listConversationsResponse struct {
+	WorkspaceID   string                        `json:"workspace_id"`
+	Conversations []conversationSummaryResponse `json:"conversations"`
+}
+
 func (h apiHandlers) submitQuestion(response http.ResponseWriter, request *http.Request) {
 	var input submitQuestionRequest
 	if err := decodeJSON(response, request, maximumQuestionBody, &input); err != nil {
@@ -520,6 +534,36 @@ func (h apiHandlers) listConversationTurns(response http.ResponseWriter, request
 		WorkspaceID:    h.scope.workspaceID,
 		ConversationID: conversationID,
 		Turns:          turnResponses,
+	})
+}
+
+func (h apiHandlers) listConversations(response http.ResponseWriter, request *http.Request) {
+	workspaceID := request.URL.Query().Get("workspace_id")
+	requestID := middleware.GetReqID(request.Context())
+	if workspaceID != h.scope.workspaceID {
+		h.writeError(response, http.StatusForbidden, "workspace_not_allowed", "unknown workspace", requestID)
+		return
+	}
+	// TODO(auth): this management endpoint is temporarily open while authentication
+	// is absent. Require administrator permission before exposing it in production;
+	// ordinary visitors must never be allowed to enumerate workspace conversations.
+	summaries, err := h.conversation.ListConversations(request.Context(), h.scope.workspaceID)
+	if err != nil {
+		h.writeError(response, http.StatusInternalServerError, "internal_error", "could not load conversations", requestID)
+		return
+	}
+	items := make([]conversationSummaryResponse, 0, len(summaries))
+	for _, summary := range summaries {
+		items = append(items, conversationSummaryResponse{
+			ConversationID:  summary.ConversationID,
+			VisitorID:       summary.VisitorID,
+			MessageCount:    summary.MessageCount,
+			LastActivityAt:  summary.LastActivityAt,
+			LastMessageText: summary.LastMessageText,
+		})
+	}
+	h.writeJSON(response, http.StatusOK, listConversationsResponse{
+		WorkspaceID: h.scope.workspaceID, Conversations: items,
 	})
 }
 

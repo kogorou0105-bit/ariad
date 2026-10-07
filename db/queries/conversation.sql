@@ -49,6 +49,18 @@ SELECT EXISTS (
       AND visitor_id = sqlc.arg(visitor_id)
 );
 
+-- name: ListConversations :many
+SELECT
+    conversation_id,
+    visitor_id,
+    COUNT(*) AS message_count,
+    MAX(created_at)::timestamptz AS last_activity_at,
+    ((ARRAY_AGG(text ORDER BY created_at DESC, message_id DESC))[1])::text AS last_message_text
+FROM conversation_messages
+WHERE workspace_id = sqlc.arg(workspace_id)
+GROUP BY conversation_id, visitor_id
+ORDER BY last_activity_at DESC, conversation_id DESC;
+
 -- name: ListConversationTurns :many
 WITH selected_messages AS (
     SELECT

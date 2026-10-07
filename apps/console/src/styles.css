@@ -75,6 +75,14 @@ button:disabled { cursor: default; opacity: .6; }
 .config-actions button:first-child { color: #fff; border-color: #22382d; background: #22382d; }
 .secondary-button { background: transparent; }
 .notice.success { padding: 14px 16px; border-radius: 9px; color: #28623d; background: #dfeee3; }
+.conversation-row small { display: block; margin-top: 8px; color: #7b6450; }
+.human-review-reply, .review-reply-form { margin-top: 22px; padding: 20px 22px; border: 1px solid #b6cedf; border-radius: 14px; background: #f1f7fb; }
+.human-review-reply span, .review-reply-form label { color: #315f7c; font-size: 11px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; }
+.human-review-reply p { line-height: 1.55; white-space: pre-wrap; }
+.human-review-reply time { color: #778078; font-size: 12px; }
+.review-reply-form { display: grid; gap: 12px; }
+.review-reply-form textarea { min-height: 120px; padding: 12px 14px; resize: vertical; border: 1px solid #aac0cd; border-radius: 8px; font: inherit; }
+.review-hint { color: #66746c; font-size: 13px; }
 
 @media (max-width: 720px) {
   .console-shell { grid-template-columns: 1fr; }

@@ -69,7 +69,7 @@ func (r *ConversationRepository) ListConversations(
 	ctx context.Context,
 	workspaceID string,
 ) ([]conversation.Summary, error) {
-	rows, err := r.queries.ListConversations(ctx, workspaceID)
+	rows, err := r.queries.ListConversations(ctx, dbgen.ListConversationsParams{WorkspaceID: workspaceID})
 	if err != nil {
 		return nil, fmt.Errorf("query conversations: %w", err)
 	}
@@ -79,8 +79,10 @@ func (r *ConversationRepository) ListConversations(
 			ConversationID:  row.ConversationID,
 			VisitorID:       row.VisitorID,
 			MessageCount:    row.MessageCount,
+			StartedAt:       row.StartedAt,
 			LastActivityAt:  row.LastActivityAt,
 			LastMessageText: row.LastMessageText,
+			Status:          row.Status,
 		})
 	}
 	return summaries, nil

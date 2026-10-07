@@ -30,9 +30,12 @@ func (r *MemoryRepository) ListConversations(ctx context.Context, workspaceID st
 		message := record.Turn.Message
 		summary, found := byConversation[message.ConversationID]
 		if !found {
-			summary = Summary{ConversationID: message.ConversationID, VisitorID: message.VisitorID}
+			summary = Summary{ConversationID: message.ConversationID, VisitorID: message.VisitorID, StartedAt: message.CreatedAt, Status: "ongoing"}
 		}
 		summary.MessageCount++
+		if message.CreatedAt.Before(summary.StartedAt) {
+			summary.StartedAt = message.CreatedAt
+		}
 		if !found || message.CreatedAt.After(summary.LastActivityAt) ||
 			(message.CreatedAt.Equal(summary.LastActivityAt) && message.ID > latestMessageIDs[message.ConversationID]) {
 			summary.LastActivityAt = message.CreatedAt

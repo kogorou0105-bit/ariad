@@ -130,6 +130,23 @@ type UsageFact struct {
 	OccurredAt       time.Time `db:"occurred_at" json:"occurred_at"`
 }
 
+type Visitor struct {
+	WorkspaceID      string    `db:"workspace_id" json:"workspace_id"`
+	VisitorID        string    `db:"visitor_id" json:"visitor_id"`
+	RefreshTokenHash []byte    `db:"refresh_token_hash" json:"refresh_token_hash"`
+	FirstSeenAt      time.Time `db:"first_seen_at" json:"first_seen_at"`
+	LastSeenAt       time.Time `db:"last_seen_at" json:"last_seen_at"`
+}
+
+type VisitorSession struct {
+	TokenHash   []byte    `db:"token_hash" json:"token_hash"`
+	WorkspaceID string    `db:"workspace_id" json:"workspace_id"`
+	VisitorID   string    `db:"visitor_id" json:"visitor_id"`
+	CreatedAt   time.Time `db:"created_at" json:"created_at"`
+	LastSeenAt  time.Time `db:"last_seen_at" json:"last_seen_at"`
+	ExpiresAt   time.Time `db:"expires_at" json:"expires_at"`
+}
+
 type WorkspaceModelConfig struct {
 	WorkspaceID      string    `db:"workspace_id" json:"workspace_id"`
 	BaseUrl          string    `db:"base_url" json:"base_url"`

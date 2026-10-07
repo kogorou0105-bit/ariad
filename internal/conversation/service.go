@@ -81,8 +81,10 @@ type Summary struct {
 	ConversationID  string
 	VisitorID       string
 	MessageCount    int64
+	StartedAt       time.Time
 	LastActivityAt  time.Time
 	LastMessageText string
+	Status          string
 }
 
 // TurnRecord stores a turn with the request identity used for strict replay validation.
@@ -145,6 +147,7 @@ type QuestionSubmitter interface {
 // HistoryReader reads persisted turns for one workspace-scoped conversation.
 type HistoryReader interface {
 	ListConversations(ctx context.Context, workspaceID string) ([]Summary, error)
+	ListVisitorConversations(ctx context.Context, workspaceID, visitorID string) ([]Summary, error)
 	ListTurns(
 		ctx context.Context,
 		workspaceID string,
@@ -250,6 +253,24 @@ func (s *Service) ListConversations(ctx context.Context, workspaceID string) ([]
 		return nil, fmt.Errorf("list conversations: %w", err)
 	}
 	return summaries, nil
+}
+
+// ListVisitorConversations returns the timeline belonging to one visitor profile.
+func (s *Service) ListVisitorConversations(ctx context.Context, workspaceID, visitorID string) ([]Summary, error) {
+	if visitorID == "" {
+		return nil, errors.New("visitor is required")
+	}
+	summaries, err := s.ListConversations(ctx, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]Summary, 0)
+	for _, summary := range summaries {
+		if summary.VisitorID == visitorID {
+			filtered = append(filtered, summary)
+		}
+	}
+	return filtered, nil
 }
 
 // SubmitQuestion runs the answer workflow and persists an idempotent turn.

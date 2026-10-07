@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -28,6 +29,10 @@ type staticPageFetcher struct {
 }
 
 const testAdminPassword = "test-admin-token"
+
+type testVisitorSession struct{ token, visitorID string }
+
+var testVisitorSessions sync.Map
 
 func (f *staticPageFetcher) Fetch(context.Context, string) (ingestion.FetchedPage, error) {
 	f.calls++
@@ -323,7 +328,7 @@ func TestSavedModelConfigImmediatelyDrivesVisitorAnswersAndResetRestoresFallback
 	}
 }
 
-func TestVisitorConversationEndpointsDoNotRequireAdministratorSession(t *testing.T) {
+func TestVisitorConversationEndpointsRequireVisitorSessionNotAdministratorSession(t *testing.T) {
 	t.Parallel()
 	router := newRouterWithBootstrapPassword(testLogger(), platformmodel.NewStub(), testAdminPassword)
 	question := postJSONForTest(t, router, "/api/v1/questions", map[string]string{
@@ -343,6 +348,85 @@ func TestVisitorConversationEndpointsDoNotRequireAdministratorSession(t *testing
 		"?workspace_id="+url.QueryEscape(developmentWorkspaceID)+"&visitor_id=visitor_public")
 	if history.Code != http.StatusOK {
 		t.Fatalf("history status = %d, body = %s", history.Code, history.Body.String())
+	}
+}
+
+func TestVisitorSessionRejectsInvalidCredentialAndVisitorIDPayload(t *testing.T) {
+	t.Parallel()
+	router := newRouterWithBootstrapPassword(testLogger(), platformmodel.NewStub(), testAdminPassword)
+	payload := map[string]string{"workspace_id": developmentWorkspaceID, "agent_id": developmentAgentID, "visitor_id": "spoofed", "channel": "widget", "locale": "en", "request_id": "req_identity", "idempotency_key": "ik_identity", "question": "Who owns this?"}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidRequest := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/questions", bytes.NewReader(body))
+	invalidRequest.Header.Set("Authorization", "Bearer invalid")
+	invalid := httptest.NewRecorder()
+	router.ServeHTTP(invalid, invalidRequest)
+	if invalid.Code != http.StatusUnauthorized || !strings.Contains(invalid.Body.String(), `"code":"visitor_session_invalid"`) {
+		t.Fatalf("invalid response = %d %s", invalid.Code, invalid.Body.String())
+	}
+
+	session := visitorSessionForTest(t, router, "real")
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/questions", bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer "+session.token)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("spoofed identity response = %d %s", response.Code, response.Body.String())
+	}
+	delete(payload, "visitor_id")
+	body, err = json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/questions", bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer "+session.token)
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("question response = %d %s", response.Code, response.Body.String())
+	}
+	listed := getAdminForTest(t, router, "/api/v1/conversations?workspace_id="+url.QueryEscape(developmentWorkspaceID))
+	if !strings.Contains(listed.Body.String(), `"visitor_id":"`+session.visitorID+`"`) || strings.Contains(listed.Body.String(), `"visitor_id":"spoofed"`) {
+		t.Fatalf("ownership response = %s", listed.Body.String())
+	}
+}
+
+func TestVisitorRefreshKeepsIdentity(t *testing.T) {
+	t.Parallel()
+	router := newRouter(testLogger(), platformmodel.NewStub())
+	body, _ := json.Marshal(map[string]string{"workspace_id": developmentWorkspaceID})
+	createdRequest := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/visitor/sessions", bytes.NewReader(body))
+	created := httptest.NewRecorder()
+	router.ServeHTTP(created, createdRequest)
+	var first visitorSessionResponse
+	if created.Code != http.StatusCreated || json.Unmarshal(created.Body.Bytes(), &first) != nil || first.RefreshToken == "" {
+		t.Fatalf("create = %d %s", created.Code, created.Body.String())
+	}
+	refreshBody, _ := json.Marshal(map[string]string{"workspace_id": developmentWorkspaceID, "refresh_token": first.RefreshToken})
+	refreshRequest := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/visitor/sessions/refresh", bytes.NewReader(refreshBody))
+	refreshedResponse := httptest.NewRecorder()
+	router.ServeHTTP(refreshedResponse, refreshRequest)
+	var refreshed visitorSessionResponse
+	if refreshedResponse.Code != http.StatusCreated || json.Unmarshal(refreshedResponse.Body.Bytes(), &refreshed) != nil || refreshed.VisitorID != first.VisitorID || refreshed.Token == first.Token {
+		t.Fatalf("refresh = %d %s", refreshedResponse.Code, refreshedResponse.Body.String())
+	}
+	if refreshed.RefreshToken == "" || refreshed.RefreshToken == first.RefreshToken {
+		t.Fatalf("refresh credential was not rotated: %s", refreshedResponse.Body.String())
+	}
+	reusedRequest := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/visitor/sessions/refresh", bytes.NewReader(refreshBody))
+	reused := httptest.NewRecorder()
+	router.ServeHTTP(reused, reusedRequest)
+	if reused.Code != http.StatusUnauthorized || !strings.Contains(reused.Body.String(), `"code":"visitor_refresh_invalid"`) {
+		t.Fatalf("reused refresh = %d %s", reused.Code, reused.Body.String())
+	}
+	invalidBody, _ := json.Marshal(map[string]string{"workspace_id": developmentWorkspaceID, "refresh_token": "invalid"})
+	invalidRequest := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/visitor/sessions/refresh", bytes.NewReader(invalidBody))
+	invalid := httptest.NewRecorder()
+	router.ServeHTTP(invalid, invalidRequest)
+	if invalid.Code != http.StatusUnauthorized {
+		t.Fatalf("invalid refresh = %d %s", invalid.Code, invalid.Body.String())
 	}
 }
 
@@ -640,8 +724,8 @@ func TestConversationHistoryIsWorkspaceScopedAndEmptyConversationIsEmpty(t *test
 		router,
 		"/api/v1/conversations/conv_empty?workspace_id="+url.QueryEscape(developmentWorkspaceID),
 	)
-	if missingVisitor.Code != http.StatusBadRequest {
-		t.Fatalf("missing visitor status = %d, want %d", missingVisitor.Code, http.StatusBadRequest)
+	if missingVisitor.Code != http.StatusUnauthorized {
+		t.Fatalf("missing visitor session status = %d, want %d", missingVisitor.Code, http.StatusUnauthorized)
 	}
 
 	forbidden := getForTest(
@@ -686,7 +770,7 @@ func TestConversationListIsWorkspaceScopedEmptyAndNewestFirst(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &listed); err != nil {
 		t.Fatalf("decode list: %v", err)
 	}
-	if len(listed.Conversations) != 2 || listed.Conversations[0].VisitorID != "visitor_new" || listed.Conversations[1].VisitorID != "visitor_old" {
+	if len(listed.Conversations) != 2 || listed.Conversations[0].VisitorID != visitorSessionForTest(t, router, "visitor_new").visitorID || listed.Conversations[1].VisitorID != visitorSessionForTest(t, router, "visitor_old").visitorID {
 		t.Fatalf("ordered conversations = %#v", listed.Conversations)
 	}
 	forbidden := getAdminForTest(t, router, "/api/v1/conversations?workspace_id=ws_other")
@@ -760,7 +844,21 @@ func postJSONForTest(
 	payload map[string]string,
 ) *httptest.ResponseRecorder {
 	t.Helper()
-	body, err := json.Marshal(payload)
+	requestPayload := make(map[string]string, len(payload))
+	for key, value := range payload {
+		requestPayload[key] = value
+	}
+	visitorLabel := requestPayload["visitor_id"]
+	var visitorSession testVisitorSession
+	if visitorLabel != "" {
+		visitorSession = visitorSessionForTest(t, handler, visitorLabel)
+		if path == "/api/v1/questions" || strings.HasSuffix(path, "/handoff") {
+			delete(requestPayload, "visitor_id")
+		} else {
+			requestPayload["visitor_id"] = visitorSession.visitorID
+		}
+	}
+	body, err := json.Marshal(requestPayload)
 	if err != nil {
 		t.Fatalf("encode request: %v", err)
 	}
@@ -770,6 +868,9 @@ func postJSONForTest(
 		path,
 		bytes.NewReader(body),
 	)
+	if path == "/api/v1/questions" || strings.HasSuffix(path, "/handoff") {
+		request.Header.Set("Authorization", "Bearer "+visitorSession.token)
+	}
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	return response
@@ -782,7 +883,14 @@ func postAdminJSONForTest(
 	payload map[string]string,
 ) *httptest.ResponseRecorder {
 	t.Helper()
-	body, err := json.Marshal(payload)
+	requestPayload := make(map[string]string, len(payload))
+	for key, value := range payload {
+		requestPayload[key] = value
+	}
+	if label := requestPayload["visitor_id"]; label != "" {
+		requestPayload["visitor_id"] = visitorSessionForTest(t, handler, label).visitorID
+	}
+	body, err := json.Marshal(requestPayload)
 	if err != nil {
 		t.Fatalf("encode request: %v", err)
 	}
@@ -795,10 +903,51 @@ func postAdminJSONForTest(
 
 func getForTest(t *testing.T, handler http.Handler, path string) *httptest.ResponseRecorder {
 	t.Helper()
+	parsed, err := url.Parse(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	visitorLabel := parsed.Query().Get("visitor_id")
+	var session testVisitorSession
+	if visitorLabel != "" {
+		session = visitorSessionForTest(t, handler, visitorLabel)
+		query := parsed.Query()
+		query.Set("visitor_id", session.visitorID)
+		parsed.RawQuery = query.Encode()
+		path = parsed.String()
+	}
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, path, nil)
+	if strings.HasPrefix(parsed.Path, "/api/v1/conversations/") && session.token != "" {
+		request.Header.Set("Authorization", "Bearer "+session.token)
+	}
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	return response
+}
+
+func visitorSessionForTest(t *testing.T, handler http.Handler, label string) testVisitorSession {
+	t.Helper()
+	key := fmt.Sprintf("%p:%s", handler, label)
+	if cached, ok := testVisitorSessions.Load(key); ok {
+		return cached.(testVisitorSession)
+	}
+	body, err := json.Marshal(map[string]string{"workspace_id": developmentWorkspaceID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/visitor/sessions", bytes.NewReader(body))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("visitor session status = %d body = %s", response.Code, response.Body.String())
+	}
+	var issued visitorSessionResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &issued); err != nil {
+		t.Fatal(err)
+	}
+	session := testVisitorSession{token: issued.Token, visitorID: issued.VisitorID}
+	actual, _ := testVisitorSessions.LoadOrStore(key, session)
+	return actual.(testVisitorSession)
 }
 
 func getAdminForTest(t *testing.T, handler http.Handler, path string) *httptest.ResponseRecorder {
@@ -849,8 +998,15 @@ func requestWithSessionForTest(t *testing.T, handler http.Handler, method, path,
 	t.Helper()
 	var body []byte
 	if payload != nil {
+		requestPayload := make(map[string]string, len(payload))
+		for key, value := range payload {
+			requestPayload[key] = value
+		}
+		if label := requestPayload["visitor_id"]; label != "" {
+			requestPayload["visitor_id"] = visitorSessionForTest(t, handler, label).visitorID
+		}
 		var err error
-		body, err = json.Marshal(payload)
+		body, err = json.Marshal(requestPayload)
 		if err != nil {
 			t.Fatal(err)
 		}

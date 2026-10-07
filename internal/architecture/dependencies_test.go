@@ -26,6 +26,7 @@ var domainNames = map[string]struct{}{
 	"review":       {},
 	"runtime":      {},
 	"tenant":       {},
+	"visitor":      {},
 }
 
 func TestRepositoryDependencyBoundaries(t *testing.T) {

@@ -18,6 +18,7 @@ import (
 	"ariad/internal/review"
 	"ariad/internal/runtime"
 	"ariad/internal/usage"
+	"ariad/internal/visitor"
 
 	"github.com/pressly/goose/v3"
 	"github.com/testcontainers/testcontainers-go"
@@ -31,6 +32,7 @@ func TestPostgresRepositories(t *testing.T) {
 	conversationRepository := NewConversationRepository(database)
 	reviewRepository := NewReviewRepository(database)
 	authRepository := NewAuthRepository(database)
+	visitorRepository := NewVisitorRepository(database)
 	modelConfigRepository, err := NewModelConfigRepository(database, base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32)))
 	if err != nil {
 		t.Fatalf("create model config repository: %v", err)
@@ -59,6 +61,35 @@ func TestPostgresRepositories(t *testing.T) {
 	})
 	t.Run("persists administrator accounts and sessions", func(t *testing.T) {
 		testAdministratorSessions(t, database, authRepository)
+	})
+	t.Run("persists visitor identities and sessions", func(t *testing.T) {
+		service := visitor.NewService(visitorRepository, time.Hour)
+		token, refreshToken, issued, err := service.Create(context.Background(), "ws_visitor")
+		if err != nil {
+			t.Fatal(err)
+		}
+		identity, err := service.Authenticate(context.Background(), token)
+		if err != nil || identity.VisitorID != issued.Identity.VisitorID {
+			t.Fatalf("identity = %#v err = %v", identity, err)
+		}
+		if _, err = database.ExecContext(context.Background(), "UPDATE visitor_sessions SET expires_at = now() - interval '1 second' WHERE token_hash = $1", issued.TokenHash); err != nil {
+			t.Fatal(err)
+		}
+		_, rotatedRefreshToken, refreshed, err := service.Refresh(context.Background(), refreshToken)
+		if err != nil || rotatedRefreshToken == refreshToken || refreshed.Identity.VisitorID != issued.Identity.VisitorID {
+			t.Fatalf("refresh = %#v %v", refreshed, err)
+		}
+		if _, _, _, err = service.Refresh(context.Background(), refreshToken); !errors.Is(err, visitor.ErrInvalidSession) {
+			t.Fatalf("reused refresh = %v", err)
+		}
+		var expiredCount int
+		if err = database.QueryRowContext(context.Background(), "SELECT count(*) FROM visitor_sessions WHERE expires_at <= now()").Scan(&expiredCount); err != nil || expiredCount != 0 {
+			t.Fatalf("expired sessions = %d err = %v", expiredCount, err)
+		}
+		profiles, err := service.ListProfiles(context.Background(), "ws_visitor")
+		if err != nil || len(profiles) != 1 || profiles[0].ConversationCount != 0 {
+			t.Fatalf("profiles = %#v err = %v", profiles, err)
+		}
 	})
 	t.Run("encrypts and isolates workspace model configurations", func(t *testing.T) {
 		testWorkspaceModelConfigs(t, database, modelConfigRepository)

@@ -1,6 +1,6 @@
 import { createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
 
-import { AdministratorsPage, ConsoleShell, ConversationDetailPage, ConversationsPage, ModelConfigPage, OverviewPage, ReviewDetailPage, ReviewQueuePage } from "./App";
+import { AdministratorsPage, ConsoleShell, ConversationDetailPage, ConversationsPage, ModelConfigPage, OverviewPage, ReviewDetailPage, ReviewQueuePage, VisitorsPage } from "./App";
 
 const rootRoute = createRootRoute({ component: ConsoleShell });
 const indexRoute = createRoute({
@@ -11,8 +11,10 @@ const indexRoute = createRoute({
 const conversationsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/conversations",
+  validateSearch: (search: Record<string, unknown>) => ({ visitorId: typeof search.visitorId === "string" ? search.visitorId : "" }),
   component: ConversationsPage,
 });
+const visitorsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/visitors", component: VisitorsPage });
 const conversationDetailRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/conversations/$conversationId",
@@ -25,7 +27,7 @@ const modelConfigRoute = createRoute({ getParentRoute: () => rootRoute, path: "/
 const reviewsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/reviews", component: ReviewQueuePage });
 const reviewDetailRoute = createRoute({ getParentRoute: () => rootRoute, path: "/reviews/$conversationId", validateSearch: (search: Record<string, unknown>) => ({ visitorId: typeof search.visitorId === "string" ? search.visitorId : "" }), component: ReviewDetailPage });
 const administratorsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/settings/administrators", component: AdministratorsPage });
-const routeTree = rootRoute.addChildren([indexRoute, conversationsRoute, conversationDetailRoute, reviewsRoute, reviewDetailRoute, modelConfigRoute, administratorsRoute]);
+const routeTree = rootRoute.addChildren([indexRoute, conversationsRoute, conversationDetailRoute, visitorsRoute, reviewsRoute, reviewDetailRoute, modelConfigRoute, administratorsRoute]);
 
 export const router = createRouter({ routeTree });
 

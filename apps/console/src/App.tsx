@@ -12,6 +12,7 @@ import type {
   AdministratorSummary,
   ListAdministratorsResponse,
   ChangeAdministratorPasswordRequest,
+  ListVisitorsResponse,
 } from "@ariad/contracts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, Outlet, useParams, useSearch } from "@tanstack/react-router";
@@ -112,7 +113,8 @@ export function ConsoleShell() {
           <Link className="nav-item" activeOptions={{ exact: true }} activeProps={{ className: "nav-item nav-item-active" }} to="/">Overview</Link>
           <span className="nav-item nav-item-disabled">Agents</span>
           <span className="nav-item nav-item-disabled">Knowledge</span>
-          <Link className="nav-item" activeProps={{ className: "nav-item nav-item-active" }} to="/conversations">Conversations</Link>
+          <Link className="nav-item" activeProps={{ className: "nav-item nav-item-active" }} to="/conversations" search={{ visitorId: "" }}>Conversations</Link>
+          <Link className="nav-item" activeProps={{ className: "nav-item nav-item-active" }} to="/visitors">Visitors</Link>
           <Link className="nav-item" activeProps={{ className: "nav-item nav-item-active" }} to="/reviews">Review queue</Link>
           <Link className="nav-item" activeProps={{ className: "nav-item nav-item-active" }} to="/settings/model">Model configuration</Link>
           <Link className="nav-item" activeProps={{ className: "nav-item nav-item-active" }} to="/settings/administrators">Administrators</Link>
@@ -262,9 +264,11 @@ export function AdministratorsPage() {
 
 export function ConversationsPage() {
   const queryClient = useQueryClient();
+  const { visitorId } = useSearch({ from: "/conversations" });
+  const [visitorFilter, setVisitorFilter] = useState(visitorId);
   const conversationsQuery = useQuery({
-    queryKey: ["conversations", workspaceID],
-    queryFn: () => getJSON<ListConversationsResponse>(`/api/v1/conversations?workspace_id=${encodeURIComponent(workspaceID)}`),
+    queryKey: ["conversations", workspaceID, visitorFilter],
+    queryFn: () => getJSON<ListConversationsResponse>(`/api/v1/conversations?workspace_id=${encodeURIComponent(workspaceID)}${visitorFilter ? `&visitor_id=${encodeURIComponent(visitorFilter)}` : ""}`),
   });
   const conversations = conversationsQuery.data?.conversations ?? [];
 
@@ -276,6 +280,7 @@ export function ConversationsPage() {
           {conversationsQuery.isFetching ? "Refreshing…" : "Refresh"}
         </button>
       </header>
+      <label htmlFor="visitor-filter">Filter by visitor</label><input id="visitor-filter" value={visitorFilter} onChange={(event) => setVisitorFilter(event.target.value.trim())} placeholder="visitor_…" />
       {conversationsQuery.error && <p className="notice error">{conversationsQuery.error.message}</p>}
       {conversationsQuery.isPending ? <p className="empty-state">Loading conversations…</p> : conversations.length === 0 ? (
         <p className="empty-state">No conversations yet.</p>
@@ -290,13 +295,18 @@ export function ConversationsPage() {
               search={{ visitorId: conversation.visitor_id }}
             >
               <div><strong>{conversation.visitor_id}</strong><p>{conversation.last_message_text}</p></div>
-              <div className="conversation-meta"><span>{conversation.message_count} {conversation.message_count === 1 ? "message" : "messages"}</span><time dateTime={conversation.last_activity_at}>{formatActivity(conversation.last_activity_at)}</time></div>
+              <div className="conversation-meta"><span>{conversation.status} · {conversation.message_count} {conversation.message_count === 1 ? "turn" : "turns"}</span><time dateTime={conversation.started_at}>Started {formatActivity(conversation.started_at)}</time><time dateTime={conversation.last_activity_at}>Active {formatActivity(conversation.last_activity_at)}</time></div>
             </Link>
           ))}
         </div>
       )}
     </section>
   );
+}
+
+export function VisitorsPage() {
+  const visitorsQuery = useQuery({ queryKey: ["visitors", workspaceID], queryFn: () => getJSON<ListVisitorsResponse>(`/api/v1/visitors?workspace_id=${encodeURIComponent(workspaceID)}`) });
+  return <section className="conversations-page"><header className="page-header"><div><div className="eyebrow">Workspace / Visitors</div><h1>Visitors</h1></div></header>{visitorsQuery.error && <p className="notice error">{visitorsQuery.error.message}</p>}{visitorsQuery.isPending ? <p className="empty-state">Loading visitors…</p> : visitorsQuery.data?.visitors.length === 0 ? <p className="empty-state">No visitors yet.</p> : <div className="conversation-list">{visitorsQuery.data?.visitors.map((visitor) => <Link className="conversation-row" key={visitor.visitor_id} to="/conversations" search={{ visitorId: visitor.visitor_id }}><div><strong>{visitor.visitor_id}</strong><p>First seen {formatActivity(visitor.first_seen_at)}</p></div><div className="conversation-meta"><span>{visitor.conversation_count} conversations · {visitor.total_turn_count} turns</span><time dateTime={visitor.last_activity_at}>{formatActivity(visitor.last_activity_at)}</time></div></Link>)}</div>}</section>;
 }
 
 export function ConversationDetailPage() {
@@ -313,7 +323,7 @@ export function ConversationDetailPage() {
 
   return (
     <section className="conversation-detail">
-      <Link className="back-link" to="/conversations">← All conversations</Link>
+      <Link className="back-link" to="/conversations" search={{ visitorId: "" }}>← All conversations</Link>
       <div className="eyebrow">Conversation</div>
       <h1>{visitorId || "Unknown visitor"}</h1>
       <p className="conversation-id">{conversationId}</p>

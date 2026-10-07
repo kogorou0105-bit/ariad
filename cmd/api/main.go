@@ -29,6 +29,7 @@ import (
 	"ariad/internal/retrieval"
 	"ariad/internal/review"
 	"ariad/internal/runtime"
+	"ariad/internal/visitor"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -160,7 +161,7 @@ func newRouterWithAllRepositories(
 	if _, _, _, err := authService.Bootstrap(context.Background(), bootstrapPassword); err != nil {
 		panic(err)
 	}
-	return newRouterWithAllServices(logger, modelAdapter, knowledgeRepository, conversationRepository, reviewRepository, pageFetcher, historyTurnLimit, modelConfigRepository, fallbackModelConfig, authService)
+	return newRouterWithAllServices(logger, modelAdapter, knowledgeRepository, conversationRepository, reviewRepository, pageFetcher, historyTurnLimit, modelConfigRepository, fallbackModelConfig, authService, visitor.NewService(visitor.NewMemoryRepository(), visitor.DefaultSessionTTL))
 }
 
 func newRouterWithAllServices(
@@ -169,6 +170,7 @@ func newRouterWithAllServices(
 	pageFetcher ingestion.Fetcher, historyTurnLimit int,
 	modelConfigRepository modelconfig.Repository, fallbackModelConfig modelconfig.Config,
 	authService *auth.Service,
+	visitorService *visitor.Service,
 ) http.Handler {
 	knowledgeService := knowledge.NewService(knowledgeRepository)
 	ingestionService := ingestion.NewService(pageFetcher, knowledgeService)
@@ -194,7 +196,7 @@ func newRouterWithAllServices(
 	// identifiers derived from an authenticated token/session. Request-body IDs
 	// are compatibility fields to validate, never the authority used downstream.
 	scope := requestScope{workspaceID: developmentWorkspaceID, agentID: developmentAgentID}
-	return newRouterWithServices(logger, scope, knowledgeService, ingestionService, conversationService, reviewService, modelConfigService, authService)
+	return newRouterWithServices(logger, scope, knowledgeService, ingestionService, conversationService, reviewService, modelConfigService, authService, visitorService)
 }
 
 func newConfiguredRouter(
@@ -218,7 +220,7 @@ func newConfiguredRouter(
 		}
 		logBootstrapAdministrator(logger, administrator, password, created)
 		conversationRepository := conversation.NewMemoryRepository()
-		return newRouterWithAllServices(logger, modelAdapter, knowledge.NewMemoryRepository(), conversationRepository, review.NewMemoryRepository(conversationRepository), platformfetch.NewHTTPFetcher(), historyTurnLimit, modelconfig.NewMemoryRepository(), fallbackConfig, authService), func() error { return nil }, nil
+		return newRouterWithAllServices(logger, modelAdapter, knowledge.NewMemoryRepository(), conversationRepository, review.NewMemoryRepository(conversationRepository), platformfetch.NewHTTPFetcher(), historyTurnLimit, modelconfig.NewMemoryRepository(), fallbackConfig, authService, visitor.NewService(visitor.NewMemoryRepository(), visitor.DefaultSessionTTL)), func() error { return nil }, nil
 	}
 	postgres, err := database.Open(ctx, databaseURL)
 	if err != nil {
@@ -251,6 +253,7 @@ func newConfiguredRouter(
 		modelConfigRepository,
 		fallbackConfig,
 		authService,
+		visitor.NewService(database.NewVisitorRepository(postgres), visitor.DefaultSessionTTL),
 	)
 	return handler, postgres.Close, nil
 }
@@ -264,6 +267,7 @@ func newRouterWithServices(
 	reviewService *review.Service,
 	modelConfigService *modelconfig.Service,
 	authService *auth.Service,
+	visitorService *visitor.Service,
 ) http.Handler {
 	handlers := apiHandlers{
 		logger:       logger,
@@ -274,12 +278,14 @@ func newRouterWithServices(
 		review:       reviewService,
 		modelConfig:  modelConfigService,
 		auth:         authService,
+		visitor:      visitorService,
 	}
 	router := chi.NewRouter()
 	router.Use(middleware.RequestID)
 	router.Use(middleware.RealIP)
 	router.Use(middleware.Recoverer)
 	adminAuthentication := newAdminAuthentication(authService, logger)
+	visitorAuthentication := visitorAuthentication{service: visitorService, logger: logger}
 
 	// Bounded request/response endpoints opt into a handler deadline. Streaming
 	// routes such as SSE must be registered outside this group and manage their
@@ -287,9 +293,14 @@ func newRouterWithServices(
 	router.Group(func(bounded chi.Router) {
 		bounded.Use(middleware.Timeout(30 * time.Second))
 		bounded.Get("/healthz", health.Handler)
-		bounded.Post("/api/v1/questions", handlers.submitQuestion)
+		bounded.Post("/api/v1/visitor/sessions", handlers.createVisitorSession)
+		bounded.Post("/api/v1/visitor/sessions/refresh", handlers.refreshVisitorSession)
 		bounded.Get("/api/v1/conversations/{conversation_id}", handlers.listConversationTurns)
-		bounded.Post("/api/v1/conversations/{conversation_id}/handoff", handlers.requestHandoff)
+		bounded.Group(func(visitorRoutes chi.Router) {
+			visitorRoutes.Use(visitorAuthentication.require)
+			visitorRoutes.Post("/api/v1/questions", handlers.submitQuestion)
+			visitorRoutes.Post("/api/v1/conversations/{conversation_id}/handoff", handlers.requestHandoff)
+		})
 		bounded.Post("/api/v1/admin/login", handlers.loginAdministrator)
 		bounded.Group(func(management chi.Router) {
 			management.Use(adminAuthentication.require)
@@ -301,6 +312,8 @@ func newRouterWithServices(
 			management.Post("/api/v1/knowledge/text", handlers.submitKnowledge)
 			management.Post("/api/v1/ingestion/url", handlers.submitURL)
 			management.Get("/api/v1/conversations", handlers.listConversations)
+			management.Get("/api/v1/visitors", handlers.listVisitors)
+			management.Get("/api/v1/visitors/{visitor_id}/conversations", handlers.listVisitorConversations)
 			management.Get("/api/v1/reviews", handlers.listReviews)
 			management.Post("/api/v1/reviews/{conversation_id}/replies", handlers.replyToReview)
 			management.Post("/api/v1/reviews/{conversation_id}/resolve", handlers.resolveReview)
@@ -322,6 +335,7 @@ type apiHandlers struct {
 	review       *review.Service
 	modelConfig  *modelconfig.Service
 	auth         *auth.Service
+	visitor      *visitor.Service
 }
 
 func logBootstrapAdministrator(logger *slog.Logger, administrator auth.Administrator, password string, created bool) {
@@ -599,12 +613,73 @@ type submitQuestionRequest struct {
 	WorkspaceID    string `json:"workspace_id"`
 	AgentID        string `json:"agent_id"`
 	ConversationID string `json:"conversation_id"`
-	VisitorID      string `json:"visitor_id"`
 	Channel        string `json:"channel"`
 	Locale         string `json:"locale"`
 	RequestID      string `json:"request_id"`
 	IdempotencyKey string `json:"idempotency_key"`
 	Question       string `json:"question"`
+}
+
+type createVisitorSessionRequest struct {
+	WorkspaceID string `json:"workspace_id"`
+}
+type visitorSessionResponse struct {
+	Token        string    `json:"token"`
+	RefreshToken string    `json:"refresh_token,omitempty"`
+	VisitorID    string    `json:"visitor_id"`
+	ExpiresAt    time.Time `json:"expires_at"`
+}
+type refreshVisitorSessionRequest struct {
+	WorkspaceID  string `json:"workspace_id"`
+	RefreshToken string `json:"refresh_token"`
+}
+type visitorProfileResponse struct {
+	VisitorID         string    `json:"visitor_id"`
+	FirstSeenAt       time.Time `json:"first_seen_at"`
+	ConversationCount int64     `json:"conversation_count"`
+	TotalTurnCount    int64     `json:"total_turn_count"`
+	LastActivityAt    time.Time `json:"last_activity_at"`
+}
+
+func (h apiHandlers) createVisitorSession(response http.ResponseWriter, request *http.Request) {
+	var input createVisitorSessionRequest
+	if err := decodeJSON(response, request, maximumAuthBody, &input); err != nil {
+		h.writeError(response, http.StatusBadRequest, "invalid_request", err.Error(), middleware.GetReqID(request.Context()))
+		return
+	}
+	if input.WorkspaceID != h.scope.workspaceID {
+		h.writeError(response, http.StatusForbidden, "workspace_not_allowed", "unknown workspace", middleware.GetReqID(request.Context()))
+		return
+	}
+	token, refreshToken, session, err := h.visitor.Create(request.Context(), h.scope.workspaceID)
+	if err != nil {
+		h.writeError(response, http.StatusInternalServerError, "internal_error", "could not create visitor session", middleware.GetReqID(request.Context()))
+		return
+	}
+	h.writeJSON(response, http.StatusCreated, visitorSessionResponse{Token: token, RefreshToken: refreshToken, VisitorID: session.Identity.VisitorID, ExpiresAt: session.ExpiresAt})
+}
+
+func (h apiHandlers) refreshVisitorSession(response http.ResponseWriter, request *http.Request) {
+	var input refreshVisitorSessionRequest
+	requestID := middleware.GetReqID(request.Context())
+	if err := decodeJSON(response, request, maximumAuthBody, &input); err != nil {
+		h.writeError(response, http.StatusBadRequest, "invalid_request", err.Error(), requestID)
+		return
+	}
+	if input.WorkspaceID != h.scope.workspaceID {
+		h.writeError(response, http.StatusForbidden, "workspace_not_allowed", "unknown workspace", requestID)
+		return
+	}
+	token, refreshToken, session, err := h.visitor.Refresh(request.Context(), input.RefreshToken)
+	if errors.Is(err, visitor.ErrInvalidSession) {
+		h.writeError(response, http.StatusUnauthorized, "visitor_refresh_invalid", "visitor refresh credential is invalid", requestID)
+		return
+	}
+	if err != nil {
+		h.writeError(response, http.StatusInternalServerError, "internal_error", "could not refresh visitor session", requestID)
+		return
+	}
+	h.writeJSON(response, http.StatusCreated, visitorSessionResponse{Token: token, RefreshToken: refreshToken, VisitorID: session.Identity.VisitorID, ExpiresAt: session.ExpiresAt})
 }
 
 type citationResponse struct {
@@ -658,7 +733,6 @@ type humanReplyResponse struct {
 
 type handoffRequest struct {
 	WorkspaceID string `json:"workspace_id"`
-	VisitorID   string `json:"visitor_id"`
 	Reason      string `json:"reason"`
 }
 type reviewMutationRequest struct {
@@ -684,8 +758,10 @@ type conversationSummaryResponse struct {
 	ConversationID  string    `json:"conversation_id"`
 	VisitorID       string    `json:"visitor_id"`
 	MessageCount    int64     `json:"message_count"`
+	StartedAt       time.Time `json:"started_at"`
 	LastActivityAt  time.Time `json:"last_activity_at"`
 	LastMessageText string    `json:"last_message_text"`
+	Status          string    `json:"status"`
 }
 
 type listConversationsResponse struct {
@@ -722,12 +798,12 @@ func (h apiHandlers) submitQuestion(response http.ResponseWriter, request *http.
 		h.writeError(response, http.StatusBadRequest, "invalid_request", "channel must be widget", input.RequestID)
 		return
 	}
-	if input.VisitorID == "" || input.RequestID == "" || input.IdempotencyKey == "" {
+	if input.RequestID == "" || input.IdempotencyKey == "" {
 		h.writeError(
 			response,
 			http.StatusBadRequest,
 			"invalid_request",
-			"visitor_id, request_id and idempotency_key are required",
+			"request_id and idempotency_key are required",
 			input.RequestID,
 		)
 		return
@@ -741,7 +817,7 @@ func (h apiHandlers) submitQuestion(response http.ResponseWriter, request *http.
 		WorkspaceID:    h.scope.workspaceID,
 		AgentID:        h.scope.agentID,
 		ConversationID: input.ConversationID,
-		VisitorID:      input.VisitorID,
+		VisitorID:      visitorFromRequest(request).VisitorID,
 		Channel:        conversation.Channel(input.Channel),
 		Locale:         input.Locale,
 		RequestID:      input.RequestID,
@@ -783,8 +859,21 @@ func (h apiHandlers) listConversationTurns(response http.ResponseWriter, request
 	}
 	conversationID := chi.URLParam(request, "conversation_id")
 	visitorID := request.URL.Query().Get("visitor_id")
+	if _, adminErr := h.auth.Authenticate(request.Context(), bearerToken(request)); adminErr != nil {
+		identity, visitorErr := h.visitor.Authenticate(request.Context(), bearerToken(request))
+		if visitorErr != nil {
+			code := "visitor_session_invalid"
+			message := "visitor session is invalid"
+			if errors.Is(visitorErr, visitor.ErrExpiredSession) {
+				code, message = "visitor_session_expired", "visitor session has expired"
+			}
+			h.writeError(response, http.StatusUnauthorized, code, message, requestID)
+			return
+		}
+		visitorID = identity.VisitorID
+	}
 	if visitorID == "" {
-		h.writeError(response, http.StatusBadRequest, "invalid_request", "visitor_id is required", requestID)
+		h.writeError(response, http.StatusBadRequest, "invalid_request", "visitor_id is required for administrator access", requestID)
 		return
 	}
 	turns, err := h.conversation.ListTurns(
@@ -852,11 +941,7 @@ func (h apiHandlers) requestHandoff(response http.ResponseWriter, request *http.
 		h.writeError(response, http.StatusForbidden, "workspace_not_allowed", "unknown workspace", requestID)
 		return
 	}
-	if input.VisitorID == "" {
-		h.writeError(response, http.StatusBadRequest, "invalid_request", "visitor_id is required", requestID)
-		return
-	}
-	state, err := h.review.Request(request.Context(), h.scope.workspaceID, chi.URLParam(request, "conversation_id"), input.VisitorID, input.Reason, "visitor")
+	state, err := h.review.Request(request.Context(), h.scope.workspaceID, chi.URLParam(request, "conversation_id"), visitorFromRequest(request).VisitorID, input.Reason, "visitor")
 	if errors.Is(err, review.ErrConversationNotFound) {
 		h.writeError(response, http.StatusNotFound, "conversation_not_found", err.Error(), requestID)
 		return
@@ -952,24 +1037,107 @@ func (h apiHandlers) listConversations(response http.ResponseWriter, request *ht
 		h.writeError(response, http.StatusForbidden, "workspace_not_allowed", "unknown workspace", requestID)
 		return
 	}
-	summaries, err := h.conversation.ListConversations(request.Context(), h.scope.workspaceID)
+	visitorID := request.URL.Query().Get("visitor_id")
+	var summaries []conversation.Summary
+	var err error
+	if visitorID == "" {
+		summaries, err = h.conversation.ListConversations(request.Context(), h.scope.workspaceID)
+	} else {
+		summaries, err = h.conversation.ListVisitorConversations(request.Context(), h.scope.workspaceID, visitorID)
+	}
 	if err != nil {
 		h.writeError(response, http.StatusInternalServerError, "internal_error", "could not load conversations", requestID)
 		return
 	}
 	items := make([]conversationSummaryResponse, 0, len(summaries))
 	for _, summary := range summaries {
+		status := summary.Status
+		if status == "" || status == string(review.StatusOngoing) {
+			state, _, stateErr := h.review.Get(request.Context(), h.scope.workspaceID, summary.ConversationID, summary.VisitorID)
+			if stateErr != nil {
+				h.writeError(response, http.StatusInternalServerError, "internal_error", "could not load conversation status", requestID)
+				return
+			}
+			status = string(state.Status)
+		}
 		items = append(items, conversationSummaryResponse{
 			ConversationID:  summary.ConversationID,
 			VisitorID:       summary.VisitorID,
 			MessageCount:    summary.MessageCount,
+			StartedAt:       summary.StartedAt,
 			LastActivityAt:  summary.LastActivityAt,
 			LastMessageText: summary.LastMessageText,
+			Status:          status,
 		})
 	}
 	h.writeJSON(response, http.StatusOK, listConversationsResponse{
 		WorkspaceID: h.scope.workspaceID, Conversations: items,
 	})
+}
+
+func (h apiHandlers) listVisitors(response http.ResponseWriter, request *http.Request) {
+	requestID := middleware.GetReqID(request.Context())
+	if request.URL.Query().Get("workspace_id") != h.scope.workspaceID {
+		h.writeError(response, http.StatusForbidden, "workspace_not_allowed", "unknown workspace", requestID)
+		return
+	}
+	profiles, err := h.visitor.ListProfiles(request.Context(), h.scope.workspaceID)
+	if err != nil {
+		h.writeError(response, http.StatusInternalServerError, "internal_error", "could not load visitors", requestID)
+		return
+	}
+	conversations, err := h.conversation.ListConversations(request.Context(), h.scope.workspaceID)
+	if err != nil {
+		h.writeError(response, http.StatusInternalServerError, "internal_error", "could not load visitor conversations", requestID)
+		return
+	}
+	conversationCounts := make(map[string]int64)
+	turnCounts := make(map[string]int64)
+	lastActivity := make(map[string]time.Time)
+	for _, summary := range conversations {
+		conversationCounts[summary.VisitorID]++
+		turnCounts[summary.VisitorID] += summary.MessageCount
+		if summary.LastActivityAt.After(lastActivity[summary.VisitorID]) {
+			lastActivity[summary.VisitorID] = summary.LastActivityAt
+		}
+	}
+	items := make([]visitorProfileResponse, 0, len(profiles))
+	for _, profile := range profiles {
+		profile.ConversationCount = conversationCounts[profile.VisitorID]
+		profile.TotalTurnCount = turnCounts[profile.VisitorID]
+		if lastActivity[profile.VisitorID].After(profile.LastActivityAt) {
+			profile.LastActivityAt = lastActivity[profile.VisitorID]
+		}
+		items = append(items, visitorProfileResponse{VisitorID: profile.VisitorID, FirstSeenAt: profile.FirstSeenAt, ConversationCount: profile.ConversationCount, TotalTurnCount: profile.TotalTurnCount, LastActivityAt: profile.LastActivityAt})
+	}
+	h.writeJSON(response, http.StatusOK, map[string]any{"workspace_id": h.scope.workspaceID, "visitors": items})
+}
+
+func (h apiHandlers) listVisitorConversations(response http.ResponseWriter, request *http.Request) {
+	requestID := middleware.GetReqID(request.Context())
+	if request.URL.Query().Get("workspace_id") != h.scope.workspaceID {
+		h.writeError(response, http.StatusForbidden, "workspace_not_allowed", "unknown workspace", requestID)
+		return
+	}
+	summaries, err := h.conversation.ListVisitorConversations(request.Context(), h.scope.workspaceID, chi.URLParam(request, "visitor_id"))
+	if err != nil {
+		h.writeError(response, http.StatusInternalServerError, "internal_error", "could not load visitor conversations", requestID)
+		return
+	}
+	items := make([]conversationSummaryResponse, 0, len(summaries))
+	for _, summary := range summaries {
+		status := summary.Status
+		if status == "" || status == string(review.StatusOngoing) {
+			state, _, stateErr := h.review.Get(request.Context(), h.scope.workspaceID, summary.ConversationID, summary.VisitorID)
+			if stateErr != nil {
+				h.writeError(response, http.StatusInternalServerError, "internal_error", "could not load conversation status", requestID)
+				return
+			}
+			status = string(state.Status)
+		}
+		items = append(items, conversationSummaryResponse{ConversationID: summary.ConversationID, VisitorID: summary.VisitorID, MessageCount: summary.MessageCount, StartedAt: summary.StartedAt, LastActivityAt: summary.LastActivityAt, LastMessageText: summary.LastMessageText, Status: status})
+	}
+	h.writeJSON(response, http.StatusOK, listConversationsResponse{WorkspaceID: h.scope.workspaceID, Conversations: items})
 }
 
 func (h apiHandlers) getModelConfig(response http.ResponseWriter, request *http.Request) {

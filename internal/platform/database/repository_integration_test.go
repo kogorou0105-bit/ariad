@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"ariad/internal/auth"
 	"ariad/internal/conversation"
 	"ariad/internal/knowledge"
 	"ariad/internal/modelconfig"
@@ -29,6 +30,7 @@ func TestPostgresRepositories(t *testing.T) {
 	knowledgeRepository := NewKnowledgeRepository(database)
 	conversationRepository := NewConversationRepository(database)
 	reviewRepository := NewReviewRepository(database)
+	authRepository := NewAuthRepository(database)
 	modelConfigRepository, err := NewModelConfigRepository(database, base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32)))
 	if err != nil {
 		t.Fatalf("create model config repository: %v", err)
@@ -55,9 +57,42 @@ func TestPostgresRepositories(t *testing.T) {
 	t.Run("persists isolated review lifecycle", func(t *testing.T) {
 		testReviewLifecycle(t, conversationRepository, reviewRepository)
 	})
+	t.Run("persists administrator accounts and sessions", func(t *testing.T) {
+		testAdministratorSessions(t, database, authRepository)
+	})
 	t.Run("encrypts and isolates workspace model configurations", func(t *testing.T) {
 		testWorkspaceModelConfigs(t, database, modelConfigRepository)
 	})
+}
+
+func testAdministratorSessions(t *testing.T, database *sql.DB, repository *AuthRepository) {
+	t.Helper()
+	ctx := context.Background()
+	service := auth.NewService(repository, time.Hour)
+	administrator, err := service.CreateAdministrator(ctx, "database-admin", "database-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored []byte
+	if err := database.QueryRowContext(ctx, "SELECT password_hash FROM administrators WHERE administrator_id = $1", administrator.ID).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if string(stored) == "database-password" {
+		t.Fatal("password stored in plaintext")
+	}
+	token, loggedIn, _, err := service.Login(ctx, "database-admin", "database-password")
+	if err != nil || loggedIn.ID != administrator.ID {
+		t.Fatalf("login = %#v err = %v", loggedIn, err)
+	}
+	if _, err := service.Authenticate(ctx, token); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Logout(ctx, token); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Authenticate(ctx, token); !errors.Is(err, auth.ErrInvalidSession) {
+		t.Fatalf("logout error = %v", err)
+	}
 }
 
 func testReviewLifecycle(t *testing.T, conversations *ConversationRepository, repository *ReviewRepository) {

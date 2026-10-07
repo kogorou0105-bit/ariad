@@ -10,6 +10,20 @@ import (
 	"time"
 )
 
+type Administrator struct {
+	AdministratorID string    `db:"administrator_id" json:"administrator_id"`
+	Username        string    `db:"username" json:"username"`
+	PasswordHash    []byte    `db:"password_hash" json:"password_hash"`
+	CreatedAt       time.Time `db:"created_at" json:"created_at"`
+}
+
+type AdministratorSession struct {
+	TokenHash       []byte    `db:"token_hash" json:"token_hash"`
+	AdministratorID string    `db:"administrator_id" json:"administrator_id"`
+	CreatedAt       time.Time `db:"created_at" json:"created_at"`
+	ExpiresAt       time.Time `db:"expires_at" json:"expires_at"`
+}
+
 type ConversationAnswer struct {
 	WorkspaceID         string    `db:"workspace_id" json:"workspace_id"`
 	AnswerID            string    `db:"answer_id" json:"answer_id"`

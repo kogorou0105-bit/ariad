@@ -41,6 +41,7 @@ const (
 	maximumIngestionBody   = 16 << 10
 	maximumQuestionBody    = 64 << 10
 	maximumModelConfigBody = 16 << 10
+	maximumAuthBody        = 16 << 10
 )
 
 func main() {
@@ -66,7 +67,6 @@ func run(ctx context.Context, logger *slog.Logger, settings config.Settings) err
 		modelAdapter,
 		settings.DatabaseURL,
 		settings.ConversationHistoryTurnLimit,
-		settings.AdminToken,
 		settings.ModelConfigEncryptionKey,
 	)
 	if err != nil {
@@ -106,33 +106,33 @@ func run(ctx context.Context, logger *slog.Logger, settings config.Settings) err
 }
 
 func newRouter(logger *slog.Logger, modelAdapter runtime.Model) http.Handler {
-	return newRouterWithAdminToken(logger, modelAdapter, "")
+	return newRouterWithBootstrapPassword(logger, modelAdapter, "")
 }
 
-func newRouterWithAdminToken(logger *slog.Logger, modelAdapter runtime.Model, adminToken string) http.Handler {
-	return newRouterWithRepositoriesAndAdminToken(
+func newRouterWithBootstrapPassword(logger *slog.Logger, modelAdapter runtime.Model, bootstrapPassword string) http.Handler {
+	return newRouterWithRepositoriesAndBootstrapPassword(
 		logger,
 		modelAdapter,
 		knowledge.NewMemoryRepository(),
 		conversation.NewMemoryRepository(),
 		platformfetch.NewHTTPFetcher(),
 		0,
-		adminToken,
+		bootstrapPassword,
 	)
 }
 
-func newRouterWithRepositoriesAndAdminToken(
+func newRouterWithRepositoriesAndBootstrapPassword(
 	logger *slog.Logger,
 	modelAdapter runtime.Model,
 	knowledgeRepository knowledge.Repository,
 	conversationRepository conversation.Repository,
 	pageFetcher ingestion.Fetcher,
 	historyTurnLimit int,
-	adminToken string,
+	bootstrapPassword string,
 ) http.Handler {
 	return newRouterWithRepositoriesAndModelConfig(
 		logger, modelAdapter, knowledgeRepository, conversationRepository, pageFetcher,
-		historyTurnLimit, adminToken, modelconfig.NewMemoryRepository(), modelconfig.Config{},
+		historyTurnLimit, bootstrapPassword, modelconfig.NewMemoryRepository(), modelconfig.Config{},
 	)
 }
 
@@ -143,18 +143,32 @@ func newRouterWithRepositoriesAndModelConfig(
 	conversationRepository conversation.Repository,
 	pageFetcher ingestion.Fetcher,
 	historyTurnLimit int,
-	adminToken string,
+	bootstrapPassword string,
 	modelConfigRepository modelconfig.Repository,
 	fallbackModelConfig modelconfig.Config,
 ) http.Handler {
-	return newRouterWithAllRepositories(logger, modelAdapter, knowledgeRepository, conversationRepository, review.NewMemoryRepository(conversationRepository), pageFetcher, historyTurnLimit, adminToken, modelConfigRepository, fallbackModelConfig)
+	return newRouterWithAllRepositories(logger, modelAdapter, knowledgeRepository, conversationRepository, review.NewMemoryRepository(conversationRepository), pageFetcher, historyTurnLimit, bootstrapPassword, modelConfigRepository, fallbackModelConfig)
 }
 
 func newRouterWithAllRepositories(
 	logger *slog.Logger, modelAdapter runtime.Model, knowledgeRepository knowledge.Repository,
 	conversationRepository conversation.Repository, reviewRepository review.Repository,
-	pageFetcher ingestion.Fetcher, historyTurnLimit int, adminToken string,
+	pageFetcher ingestion.Fetcher, historyTurnLimit int, bootstrapPassword string,
 	modelConfigRepository modelconfig.Repository, fallbackModelConfig modelconfig.Config,
+) http.Handler {
+	authService := auth.NewService(auth.NewMemoryRepository(), auth.DefaultSessionTTL)
+	if _, _, _, err := authService.Bootstrap(context.Background(), bootstrapPassword); err != nil {
+		panic(err)
+	}
+	return newRouterWithAllServices(logger, modelAdapter, knowledgeRepository, conversationRepository, reviewRepository, pageFetcher, historyTurnLimit, modelConfigRepository, fallbackModelConfig, authService)
+}
+
+func newRouterWithAllServices(
+	logger *slog.Logger, modelAdapter runtime.Model, knowledgeRepository knowledge.Repository,
+	conversationRepository conversation.Repository, reviewRepository review.Repository,
+	pageFetcher ingestion.Fetcher, historyTurnLimit int,
+	modelConfigRepository modelconfig.Repository, fallbackModelConfig modelconfig.Config,
+	authService *auth.Service,
 ) http.Handler {
 	knowledgeService := knowledge.NewService(knowledgeRepository)
 	ingestionService := ingestion.NewService(pageFetcher, knowledgeService)
@@ -180,7 +194,7 @@ func newRouterWithAllRepositories(
 	// identifiers derived from an authenticated token/session. Request-body IDs
 	// are compatibility fields to validate, never the authority used downstream.
 	scope := requestScope{workspaceID: developmentWorkspaceID, agentID: developmentAgentID}
-	return newRouterWithServices(logger, scope, knowledgeService, ingestionService, conversationService, reviewService, modelConfigService, adminToken)
+	return newRouterWithServices(logger, scope, knowledgeService, ingestionService, conversationService, reviewService, modelConfigService, authService)
 }
 
 func newConfiguredRouter(
@@ -189,7 +203,6 @@ func newConfiguredRouter(
 	modelAdapter runtime.Model,
 	databaseURL string,
 	historyTurnLimit int,
-	adminToken string,
 	modelConfigEncryptionKey string,
 ) (http.Handler, func() error, error) {
 	environmentModel := platformmodel.SettingsFromEnvironment()
@@ -198,17 +211,14 @@ func newConfiguredRouter(
 		fallbackConfig = modelconfig.Config{Model: "grounded-v1"}
 	}
 	if databaseURL == "" {
-		return newRouterWithRepositoriesAndModelConfig(
-			logger,
-			modelAdapter,
-			knowledge.NewMemoryRepository(),
-			conversation.NewMemoryRepository(),
-			platformfetch.NewHTTPFetcher(),
-			historyTurnLimit,
-			adminToken,
-			modelconfig.NewMemoryRepository(),
-			fallbackConfig,
-		), func() error { return nil }, nil
+		authService := auth.NewService(auth.NewMemoryRepository(), auth.DefaultSessionTTL)
+		administrator, password, created, bootstrapErr := authService.Bootstrap(ctx, "")
+		if bootstrapErr != nil {
+			return nil, nil, bootstrapErr
+		}
+		logBootstrapAdministrator(logger, administrator, password, created)
+		conversationRepository := conversation.NewMemoryRepository()
+		return newRouterWithAllServices(logger, modelAdapter, knowledge.NewMemoryRepository(), conversationRepository, review.NewMemoryRepository(conversationRepository), platformfetch.NewHTTPFetcher(), historyTurnLimit, modelconfig.NewMemoryRepository(), fallbackConfig, authService), func() error { return nil }, nil
 	}
 	postgres, err := database.Open(ctx, databaseURL)
 	if err != nil {
@@ -223,7 +233,14 @@ func newConfiguredRouter(
 		_ = postgres.Close()
 		return nil, nil, err
 	}
-	handler := newRouterWithAllRepositories(
+	authService := auth.NewService(database.NewAuthRepository(postgres), auth.DefaultSessionTTL)
+	administrator, password, created, err := authService.Bootstrap(ctx, "")
+	if err != nil {
+		_ = postgres.Close()
+		return nil, nil, fmt.Errorf("bootstrap administrator: %w", err)
+	}
+	logBootstrapAdministrator(logger, administrator, password, created)
+	handler := newRouterWithAllServices(
 		logger,
 		modelAdapter,
 		database.NewKnowledgeRepository(postgres),
@@ -231,9 +248,9 @@ func newConfiguredRouter(
 		database.NewReviewRepository(postgres),
 		platformfetch.NewHTTPFetcher(),
 		historyTurnLimit,
-		adminToken,
 		modelConfigRepository,
 		fallbackConfig,
+		authService,
 	)
 	return handler, postgres.Close, nil
 }
@@ -246,7 +263,7 @@ func newRouterWithServices(
 	conversationService conversation.QuestionService,
 	reviewService *review.Service,
 	modelConfigService *modelconfig.Service,
-	adminToken string,
+	authService *auth.Service,
 ) http.Handler {
 	handlers := apiHandlers{
 		logger:       logger,
@@ -256,12 +273,13 @@ func newRouterWithServices(
 		conversation: conversationService,
 		review:       reviewService,
 		modelConfig:  modelConfigService,
+		auth:         authService,
 	}
 	router := chi.NewRouter()
 	router.Use(middleware.RequestID)
 	router.Use(middleware.RealIP)
 	router.Use(middleware.Recoverer)
-	adminAuthentication := auth.NewAdminMiddleware(adminToken, logger)
+	adminAuthentication := newAdminAuthentication(authService, logger)
 
 	// Bounded request/response endpoints opt into a handler deadline. Streaming
 	// routes such as SSE must be registered outside this group and manage their
@@ -272,8 +290,14 @@ func newRouterWithServices(
 		bounded.Post("/api/v1/questions", handlers.submitQuestion)
 		bounded.Get("/api/v1/conversations/{conversation_id}", handlers.listConversationTurns)
 		bounded.Post("/api/v1/conversations/{conversation_id}/handoff", handlers.requestHandoff)
+		bounded.Post("/api/v1/admin/login", handlers.loginAdministrator)
 		bounded.Group(func(management chi.Router) {
-			management.Use(adminAuthentication.RequireAdmin)
+			management.Use(adminAuthentication.require)
+			management.Post("/api/v1/admin/logout", handlers.logoutAdministrator)
+			management.Post("/api/v1/admin/accounts", handlers.createAdministrator)
+			management.Get("/api/v1/admin/accounts", handlers.listAdministrators)
+			management.Delete("/api/v1/admin/accounts/{administrator_id}", handlers.deleteAdministrator)
+			management.Post("/api/v1/admin/password", handlers.changeAdministratorPassword)
 			management.Post("/api/v1/knowledge/text", handlers.submitKnowledge)
 			management.Post("/api/v1/ingestion/url", handlers.submitURL)
 			management.Get("/api/v1/conversations", handlers.listConversations)
@@ -297,11 +321,146 @@ type apiHandlers struct {
 	conversation conversation.QuestionService
 	review       *review.Service
 	modelConfig  *modelconfig.Service
+	auth         *auth.Service
+}
+
+func logBootstrapAdministrator(logger *slog.Logger, administrator auth.Administrator, password string, created bool) {
+	if created {
+		logger.Warn("created initial administrator; save this password because it will not be shown again", "username", administrator.Username, "initial_password", password)
+	}
 }
 
 type requestScope struct {
 	workspaceID string
 	agentID     string
+}
+
+type administratorCredentialsRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+type administratorResponse struct {
+	AdministratorID string `json:"administrator_id"`
+	Username        string `json:"username"`
+}
+type loginResponse struct {
+	Token         string                `json:"token"`
+	ExpiresAt     time.Time             `json:"expires_at"`
+	Administrator administratorResponse `json:"administrator"`
+}
+type changePasswordRequest struct {
+	CurrentPassword string `json:"current_password"`
+	NewPassword     string `json:"new_password"`
+}
+
+func (h apiHandlers) loginAdministrator(response http.ResponseWriter, request *http.Request) {
+	var input administratorCredentialsRequest
+	if err := decodeJSON(response, request, maximumAuthBody, &input); err != nil {
+		h.writeError(response, http.StatusBadRequest, "invalid_request", err.Error(), middleware.GetReqID(request.Context()))
+		return
+	}
+	token, administrator, expiresAt, err := h.auth.Login(request.Context(), input.Username, input.Password)
+	if errors.Is(err, auth.ErrInvalidCredentials) {
+		h.writeError(response, http.StatusUnauthorized, "invalid_credentials", "invalid username or password", middleware.GetReqID(request.Context()))
+		return
+	}
+	if errors.Is(err, auth.ErrTooManyAttempts) {
+		h.writeError(response, http.StatusTooManyRequests, "login_rate_limited", err.Error(), middleware.GetReqID(request.Context()))
+		return
+	}
+	if err != nil {
+		h.writeError(response, http.StatusInternalServerError, "internal_error", "could not create administrator session", middleware.GetReqID(request.Context()))
+		return
+	}
+	h.writeJSON(response, http.StatusOK, loginResponse{Token: token, ExpiresAt: expiresAt, Administrator: administratorResponse{AdministratorID: administrator.ID, Username: administrator.Username}})
+}
+
+func (h apiHandlers) listAdministrators(response http.ResponseWriter, request *http.Request) {
+	administrators, err := h.auth.ListAdministrators(request.Context())
+	if err != nil {
+		h.writeError(response, http.StatusInternalServerError, "internal_error", "could not list administrators", middleware.GetReqID(request.Context()))
+		return
+	}
+	items := make([]administratorResponse, 0, len(administrators))
+	for _, administrator := range administrators {
+		items = append(items, administratorResponse{AdministratorID: administrator.ID, Username: administrator.Username})
+	}
+	h.writeJSON(response, http.StatusOK, map[string]any{"administrators": items})
+}
+
+func (h apiHandlers) changeAdministratorPassword(response http.ResponseWriter, request *http.Request) {
+	var input changePasswordRequest
+	if err := decodeJSON(response, request, maximumAuthBody, &input); err != nil {
+		h.writeError(response, http.StatusBadRequest, "invalid_request", err.Error(), middleware.GetReqID(request.Context()))
+		return
+	}
+	administrator := authenticatedAdministrator(request)
+	err := h.auth.ChangePassword(request.Context(), administrator.ID, input.CurrentPassword, input.NewPassword)
+	if errors.Is(err, auth.ErrInvalidCredentials) {
+		h.writeError(response, http.StatusUnauthorized, "invalid_credentials", "current password is incorrect", middleware.GetReqID(request.Context()))
+		return
+	}
+	if errors.Is(err, auth.ErrPasswordTooShort) {
+		h.writeError(response, http.StatusBadRequest, "invalid_password", err.Error(), middleware.GetReqID(request.Context()))
+		return
+	}
+	if err != nil {
+		h.writeError(response, http.StatusInternalServerError, "internal_error", "could not change password", middleware.GetReqID(request.Context()))
+		return
+	}
+	h.writeJSON(response, http.StatusOK, map[string]bool{"password_changed": true})
+}
+
+func (h apiHandlers) deleteAdministrator(response http.ResponseWriter, request *http.Request) {
+	current := authenticatedAdministrator(request)
+	err := h.auth.DeleteAdministrator(request.Context(), current.ID, chi.URLParam(request, "administrator_id"))
+	if errors.Is(err, auth.ErrAdministratorNotFound) {
+		h.writeError(response, http.StatusNotFound, "administrator_not_found", err.Error(), middleware.GetReqID(request.Context()))
+		return
+	}
+	if errors.Is(err, auth.ErrCannotDeleteSelf) || errors.Is(err, auth.ErrLastAdministrator) {
+		h.writeError(response, http.StatusConflict, "administrator_not_deletable", err.Error(), middleware.GetReqID(request.Context()))
+		return
+	}
+	if err != nil {
+		h.writeError(response, http.StatusInternalServerError, "internal_error", "could not delete administrator", middleware.GetReqID(request.Context()))
+		return
+	}
+	h.writeJSON(response, http.StatusOK, map[string]bool{"deleted": true})
+}
+
+func (h apiHandlers) logoutAdministrator(response http.ResponseWriter, request *http.Request) {
+	if err := h.auth.Logout(request.Context(), bearerToken(request)); err != nil {
+		h.writeError(response, http.StatusInternalServerError, "internal_error", "could not end administrator session", middleware.GetReqID(request.Context()))
+		return
+	}
+	h.writeJSON(response, http.StatusOK, map[string]bool{"logged_out": true})
+}
+
+func (h apiHandlers) createAdministrator(response http.ResponseWriter, request *http.Request) {
+	var input administratorCredentialsRequest
+	if err := decodeJSON(response, request, maximumAuthBody, &input); err != nil {
+		h.writeError(response, http.StatusBadRequest, "invalid_request", err.Error(), middleware.GetReqID(request.Context()))
+		return
+	}
+	administrator, err := h.auth.CreateAdministrator(request.Context(), input.Username, input.Password)
+	if errors.Is(err, auth.ErrUsernameRequired) || errors.Is(err, auth.ErrPasswordTooShort) {
+		h.writeError(response, http.StatusBadRequest, "invalid_administrator", err.Error(), middleware.GetReqID(request.Context()))
+		return
+	}
+	if errors.Is(err, auth.ErrUsernameExists) {
+		h.writeError(response, http.StatusConflict, "administrator_exists", err.Error(), middleware.GetReqID(request.Context()))
+		return
+	}
+	if err != nil {
+		h.writeError(response, http.StatusInternalServerError, "internal_error", "could not create administrator", middleware.GetReqID(request.Context()))
+		return
+	}
+	h.writeJSON(response, http.StatusCreated, administratorResponse{AdministratorID: administrator.ID, Username: administrator.Username})
+}
+
+func authenticatedAdministrator(request *http.Request) auth.Administrator {
+	return administratorFromRequest(request)
 }
 
 type submitKnowledgeRequest struct {
@@ -738,7 +897,7 @@ func (h apiHandlers) replyToReview(response http.ResponseWriter, request *http.R
 		h.writeError(response, http.StatusForbidden, "workspace_not_allowed", "unknown workspace", requestID)
 		return
 	}
-	reply, err := h.review.Reply(request.Context(), h.scope.workspaceID, chi.URLParam(request, "conversation_id"), input.VisitorID, "admin", input.Text)
+	reply, err := h.review.Reply(request.Context(), h.scope.workspaceID, chi.URLParam(request, "conversation_id"), input.VisitorID, authenticatedAdministrator(request).ID, input.Text)
 	if errors.Is(err, review.ErrConversationNotFound) {
 		h.writeError(response, http.StatusNotFound, "conversation_not_found", err.Error(), requestID)
 		return
@@ -770,7 +929,7 @@ func (h apiHandlers) resolveReview(response http.ResponseWriter, request *http.R
 		return
 	}
 	conversationID := chi.URLParam(request, "conversation_id")
-	err := h.review.Resolve(request.Context(), h.scope.workspaceID, conversationID, input.VisitorID, "admin")
+	err := h.review.Resolve(request.Context(), h.scope.workspaceID, conversationID, input.VisitorID, authenticatedAdministrator(request).ID)
 	if errors.Is(err, review.ErrConversationNotFound) {
 		h.writeError(response, http.StatusNotFound, "conversation_not_found", err.Error(), requestID)
 		return

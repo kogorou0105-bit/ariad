@@ -188,3 +188,35 @@ func TestSubmitTextSplitsLongText(t *testing.T) {
 		t.Fatalf("chunk count = %d, want 2", result.ChunkCount)
 	}
 }
+
+func TestFileSourceLifecycleAndEmbeddings(t *testing.T) {
+	repository := NewMemoryRepository()
+	service := NewService(repository, WithEmbedder(&fixedKnowledgeEmbedder{}))
+	result, err := service.SubmitText(context.Background(), SubmitTextCommand{WorkspaceID: "ws", IdempotencyKey: "file-1", Title: "guide.txt", Text: "Initial file knowledge", SourceType: "file", FileName: "guide.txt", MediaType: "text/plain", FileContent: []byte("Initial file knowledge")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, found, err := service.GetSource(context.Background(), "ws", result.SourceID)
+	if err != nil || !found || source.Type != "file" || source.Status != "ready" || source.ChunkCount != 1 {
+		t.Fatalf("source = %#v found = %v err = %v", source, found, err)
+	}
+	chunks, _ := service.ListChunks(context.Background(), "ws")
+	if len(chunks) != 1 || len(chunks[0].Embedding) == 0 {
+		t.Fatalf("chunks = %#v", chunks)
+	}
+	if err := service.ReprocessSource(context.Background(), source.Source, "Replacement knowledge"); err != nil {
+		t.Fatal(err)
+	}
+	chunks, _ = service.ListChunks(context.Background(), "ws")
+	if len(chunks) != 1 || chunks[0].Text != "Replacement knowledge" || len(chunks[0].Embedding) == 0 {
+		t.Fatalf("reprocessed chunks = %#v", chunks)
+	}
+	deleted, err := service.DeleteSource(context.Background(), "ws", result.SourceID)
+	if err != nil || !deleted {
+		t.Fatalf("deleted = %v err = %v", deleted, err)
+	}
+	chunks, _ = service.ListChunks(context.Background(), "ws")
+	if len(chunks) != 0 {
+		t.Fatalf("chunks after delete = %#v", chunks)
+	}
+}

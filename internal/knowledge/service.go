@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -28,7 +29,20 @@ type Source struct {
 	WorkspaceID string
 	Title       string
 	SourceURL   string
+	Type        string
+	Status      string
+	FileName    string
+	MediaType   string
+	FileSize    int64
+	FileContent []byte
+	Error       string
 	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
+type SourceSummary struct {
+	Source
+	ChunkCount int
 }
 
 // Chunk is a normalized, immutable section of a source.
@@ -48,12 +62,17 @@ type Embedder interface {
 
 // SubmitTextCommand contains the tenant and retry context for a text submission.
 type SubmitTextCommand struct {
-	WorkspaceID    string
-	RequestID      string
-	IdempotencyKey string
-	Title          string
-	SourceURL      string
-	Text           string
+	WorkspaceID     string
+	RequestID       string
+	IdempotencyKey  string
+	Title           string
+	SourceURL       string
+	Text            string
+	SourceType      string
+	FileName        string
+	MediaType       string
+	FileContent     []byte
+	ProcessingError string
 }
 
 // SubmitTextResult identifies the immutable source produced by a submission.
@@ -91,6 +110,10 @@ type Repository interface {
 	SaveEmbedding(ctx context.Context, workspaceID, chunkID string, embedding []float64) error
 	GetEmbeddingBackfill(ctx context.Context, workspaceID string) (EmbeddingBackfillStatus, bool, error)
 	SaveEmbeddingBackfill(ctx context.Context, workspaceID string, status EmbeddingBackfillStatus) error
+	ListSources(ctx context.Context, workspaceID string) ([]SourceSummary, error)
+	GetSource(ctx context.Context, workspaceID, sourceID string) (SourceSummary, bool, error)
+	DeleteSource(ctx context.Context, workspaceID, sourceID string) (bool, error)
+	ReplaceSourceChunks(ctx context.Context, source Source, chunks []Chunk) error
 }
 
 type EmbeddingFailure struct {
@@ -245,7 +268,7 @@ func (s *Service) SubmitText(
 	command SubmitTextCommand,
 ) (SubmitTextResult, error) {
 	text := strings.TrimSpace(command.Text)
-	if text == "" {
+	if text == "" && command.ProcessingError == "" {
 		return SubmitTextResult{}, ErrInvalidText
 	}
 	if command.WorkspaceID == "" || command.IdempotencyKey == "" {
@@ -257,6 +280,9 @@ func (s *Service) SubmitText(
 		title = "Pasted text"
 	}
 	payloadFingerprint := fingerprint(title, text)
+	if command.SourceType == "file" {
+		payloadFingerprint = fingerprint("file", strings.ToLower(filepath.Ext(command.FileName)), string(command.FileContent))
+	}
 
 	previous, found, err := s.repository.FindSubmission(
 		ctx,
@@ -282,7 +308,21 @@ func (s *Service) SubmitText(
 		WorkspaceID: command.WorkspaceID,
 		Title:       title,
 		SourceURL:   sourceURL,
+		Type:        command.SourceType,
+		Status:      "ready",
+		FileName:    command.FileName,
+		MediaType:   command.MediaType,
+		FileSize:    int64(len(command.FileContent)),
+		FileContent: append([]byte(nil), command.FileContent...),
+		Error:       command.ProcessingError,
 		CreatedAt:   s.clock().UTC(),
+		UpdatedAt:   s.clock().UTC(),
+	}
+	if source.Type == "" {
+		source.Type = "text"
+	}
+	if source.Error != "" {
+		source.Status = "failed"
 	}
 
 	parts := splitText(text, maximumChunkRunes)
@@ -333,6 +373,43 @@ func (s *Service) reportEmbeddingError(workspaceID, chunkID string, err error) {
 // ListChunks returns a copy of every chunk visible to the workspace.
 func (s *Service) ListChunks(ctx context.Context, workspaceID string) ([]Chunk, error) {
 	return s.repository.ListChunks(ctx, workspaceID)
+}
+
+func (s *Service) ListSources(ctx context.Context, workspaceID string) ([]SourceSummary, error) {
+	return s.repository.ListSources(ctx, workspaceID)
+}
+
+func (s *Service) GetSource(ctx context.Context, workspaceID, sourceID string) (SourceSummary, bool, error) {
+	return s.repository.GetSource(ctx, workspaceID, sourceID)
+}
+
+func (s *Service) DeleteSource(ctx context.Context, workspaceID, sourceID string) (bool, error) {
+	return s.repository.DeleteSource(ctx, workspaceID, sourceID)
+}
+
+func (s *Service) ReprocessSource(ctx context.Context, source Source, text string) error {
+	parts := splitText(strings.TrimSpace(text), maximumChunkRunes)
+	if len(parts) == 0 {
+		return ErrInvalidText
+	}
+	chunks := make([]Chunk, 0, len(parts))
+	for ordinal, part := range parts {
+		chunkID, err := randomID("chk")
+		if err != nil {
+			return err
+		}
+		chunk := Chunk{ID: chunkID, WorkspaceID: source.WorkspaceID, SourceID: source.ID, SourceTitle: source.Title, Ordinal: ordinal, Text: part}
+		if s.embedder != nil {
+			if vector, err := s.embedder.Embed(ctx, source.WorkspaceID, part); err == nil {
+				chunk.Embedding = vector
+			} else {
+				s.reportEmbeddingError(source.WorkspaceID, chunk.ID, err)
+			}
+		}
+		chunks = append(chunks, chunk)
+	}
+	source.Status, source.Error, source.UpdatedAt = "ready", "", s.clock().UTC()
+	return s.repository.ReplaceSourceChunks(ctx, source, chunks)
 }
 
 func randomID(prefix string) (string, error) {

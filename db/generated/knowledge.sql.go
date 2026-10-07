@@ -11,6 +11,37 @@ import (
 	"time"
 )
 
+const deleteKnowledgeSource = `-- name: DeleteKnowledgeSource :execrows
+DELETE FROM knowledge_sources WHERE workspace_id = $1 AND source_id = $2
+`
+
+type DeleteKnowledgeSourceParams struct {
+	WorkspaceID string `db:"workspace_id" json:"workspace_id"`
+	SourceID    string `db:"source_id" json:"source_id"`
+}
+
+func (q *Queries) DeleteKnowledgeSource(ctx context.Context, arg DeleteKnowledgeSourceParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteKnowledgeSource, arg.WorkspaceID, arg.SourceID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const deleteKnowledgeSourceChunks = `-- name: DeleteKnowledgeSourceChunks :exec
+DELETE FROM knowledge_chunks WHERE workspace_id = $1 AND source_id = $2
+`
+
+type DeleteKnowledgeSourceChunksParams struct {
+	WorkspaceID string `db:"workspace_id" json:"workspace_id"`
+	SourceID    string `db:"source_id" json:"source_id"`
+}
+
+func (q *Queries) DeleteKnowledgeSourceChunks(ctx context.Context, arg DeleteKnowledgeSourceChunksParams) error {
+	_, err := q.db.ExecContext(ctx, deleteKnowledgeSourceChunks, arg.WorkspaceID, arg.SourceID)
+	return err
+}
+
 const getKnowledgeEmbeddingBackfill = `-- name: GetKnowledgeEmbeddingBackfill :one
 SELECT workspace_id, status, total, completed, failed, failures, error, updated_at
 FROM knowledge_embedding_backfills
@@ -29,6 +60,61 @@ func (q *Queries) GetKnowledgeEmbeddingBackfill(ctx context.Context, workspaceID
 		&i.Failures,
 		&i.Error,
 		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getKnowledgeSource = `-- name: GetKnowledgeSource :one
+SELECT source.workspace_id, source.source_id, source.title, source.source_url,
+       source.source_type, source.status, source.file_name, source.media_type,
+       source.file_size, source.file_content, source.error_message, source.created_at, source.updated_at,
+       count(chunk.chunk_id)::bigint AS chunk_count
+FROM knowledge_sources source
+LEFT JOIN knowledge_chunks chunk ON chunk.workspace_id = source.workspace_id AND chunk.source_id = source.source_id
+WHERE source.workspace_id = $1 AND source.source_id = $2
+GROUP BY source.workspace_id, source.source_id
+`
+
+type GetKnowledgeSourceParams struct {
+	WorkspaceID string `db:"workspace_id" json:"workspace_id"`
+	SourceID    string `db:"source_id" json:"source_id"`
+}
+
+type GetKnowledgeSourceRow struct {
+	WorkspaceID  string         `db:"workspace_id" json:"workspace_id"`
+	SourceID     string         `db:"source_id" json:"source_id"`
+	Title        string         `db:"title" json:"title"`
+	SourceUrl    sql.NullString `db:"source_url" json:"source_url"`
+	SourceType   string         `db:"source_type" json:"source_type"`
+	Status       string         `db:"status" json:"status"`
+	FileName     sql.NullString `db:"file_name" json:"file_name"`
+	MediaType    sql.NullString `db:"media_type" json:"media_type"`
+	FileSize     sql.NullInt64  `db:"file_size" json:"file_size"`
+	FileContent  []byte         `db:"file_content" json:"file_content"`
+	ErrorMessage sql.NullString `db:"error_message" json:"error_message"`
+	CreatedAt    time.Time      `db:"created_at" json:"created_at"`
+	UpdatedAt    time.Time      `db:"updated_at" json:"updated_at"`
+	ChunkCount   int64          `db:"chunk_count" json:"chunk_count"`
+}
+
+func (q *Queries) GetKnowledgeSource(ctx context.Context, arg GetKnowledgeSourceParams) (GetKnowledgeSourceRow, error) {
+	row := q.db.QueryRowContext(ctx, getKnowledgeSource, arg.WorkspaceID, arg.SourceID)
+	var i GetKnowledgeSourceRow
+	err := row.Scan(
+		&i.WorkspaceID,
+		&i.SourceID,
+		&i.Title,
+		&i.SourceUrl,
+		&i.SourceType,
+		&i.Status,
+		&i.FileName,
+		&i.MediaType,
+		&i.FileSize,
+		&i.FileContent,
+		&i.ErrorMessage,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ChunkCount,
 	)
 	return i, err
 }
@@ -116,9 +202,17 @@ INSERT INTO knowledge_sources (
     source_id,
     title,
     source_url,
+    source_type,
+    status,
+    file_name,
+    media_type,
+    file_size,
+    file_content,
+    error_message,
     idempotency_key,
     payload_fingerprint,
-    created_at
+    created_at,
+    updated_at
 ) VALUES (
     $1,
     $2,
@@ -126,7 +220,15 @@ INSERT INTO knowledge_sources (
     $4,
     $5,
     $6,
-    $7
+    $7,
+    $8,
+    $9,
+    $10,
+    $11,
+    $12,
+    $13,
+    $14,
+    $14
 )
 RETURNING workspace_id, source_id, title, source_url, idempotency_key, payload_fingerprint, created_at
 `
@@ -136,6 +238,13 @@ type InsertKnowledgeSourceParams struct {
 	SourceID           string         `db:"source_id" json:"source_id"`
 	Title              string         `db:"title" json:"title"`
 	SourceUrl          sql.NullString `db:"source_url" json:"source_url"`
+	SourceType         string         `db:"source_type" json:"source_type"`
+	Status             string         `db:"status" json:"status"`
+	FileName           sql.NullString `db:"file_name" json:"file_name"`
+	MediaType          sql.NullString `db:"media_type" json:"media_type"`
+	FileSize           sql.NullInt64  `db:"file_size" json:"file_size"`
+	FileContent        []byte         `db:"file_content" json:"file_content"`
+	ErrorMessage       sql.NullString `db:"error_message" json:"error_message"`
 	IdempotencyKey     string         `db:"idempotency_key" json:"idempotency_key"`
 	PayloadFingerprint string         `db:"payload_fingerprint" json:"payload_fingerprint"`
 	CreatedAt          time.Time      `db:"created_at" json:"created_at"`
@@ -157,6 +266,13 @@ func (q *Queries) InsertKnowledgeSource(ctx context.Context, arg InsertKnowledge
 		arg.SourceID,
 		arg.Title,
 		arg.SourceUrl,
+		arg.SourceType,
+		arg.Status,
+		arg.FileName,
+		arg.MediaType,
+		arg.FileSize,
+		arg.FileContent,
+		arg.ErrorMessage,
 		arg.IdempotencyKey,
 		arg.PayloadFingerprint,
 		arg.CreatedAt,
@@ -233,6 +349,71 @@ func (q *Queries) ListKnowledgeChunks(ctx context.Context, workspaceID string) (
 	return items, nil
 }
 
+const listKnowledgeSources = `-- name: ListKnowledgeSources :many
+SELECT source.workspace_id, source.source_id, source.title, source.source_url,
+       source.source_type, source.status, source.file_name, source.media_type,
+       source.file_size, source.error_message, source.created_at, source.updated_at,
+       count(chunk.chunk_id)::bigint AS chunk_count
+FROM knowledge_sources source
+LEFT JOIN knowledge_chunks chunk ON chunk.workspace_id = source.workspace_id AND chunk.source_id = source.source_id
+WHERE source.workspace_id = $1
+GROUP BY source.workspace_id, source.source_id
+ORDER BY source.created_at DESC
+`
+
+type ListKnowledgeSourcesRow struct {
+	WorkspaceID  string         `db:"workspace_id" json:"workspace_id"`
+	SourceID     string         `db:"source_id" json:"source_id"`
+	Title        string         `db:"title" json:"title"`
+	SourceUrl    sql.NullString `db:"source_url" json:"source_url"`
+	SourceType   string         `db:"source_type" json:"source_type"`
+	Status       string         `db:"status" json:"status"`
+	FileName     sql.NullString `db:"file_name" json:"file_name"`
+	MediaType    sql.NullString `db:"media_type" json:"media_type"`
+	FileSize     sql.NullInt64  `db:"file_size" json:"file_size"`
+	ErrorMessage sql.NullString `db:"error_message" json:"error_message"`
+	CreatedAt    time.Time      `db:"created_at" json:"created_at"`
+	UpdatedAt    time.Time      `db:"updated_at" json:"updated_at"`
+	ChunkCount   int64          `db:"chunk_count" json:"chunk_count"`
+}
+
+func (q *Queries) ListKnowledgeSources(ctx context.Context, workspaceID string) ([]ListKnowledgeSourcesRow, error) {
+	rows, err := q.db.QueryContext(ctx, listKnowledgeSources, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListKnowledgeSourcesRow{}
+	for rows.Next() {
+		var i ListKnowledgeSourcesRow
+		if err := rows.Scan(
+			&i.WorkspaceID,
+			&i.SourceID,
+			&i.Title,
+			&i.SourceUrl,
+			&i.SourceType,
+			&i.Status,
+			&i.FileName,
+			&i.MediaType,
+			&i.FileSize,
+			&i.ErrorMessage,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.ChunkCount,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const lockKnowledgeSubmission = `-- name: LockKnowledgeSubmission :exec
 SELECT pg_advisory_xact_lock(hashtextextended(
     'knowledge-submission:' || $1 || ':' || $2,
@@ -247,6 +428,46 @@ type LockKnowledgeSubmissionParams struct {
 
 func (q *Queries) LockKnowledgeSubmission(ctx context.Context, arg LockKnowledgeSubmissionParams) error {
 	_, err := q.db.ExecContext(ctx, lockKnowledgeSubmission, arg.WorkspaceID, arg.IdempotencyKey)
+	return err
+}
+
+const updateKnowledgeSourceProcessing = `-- name: UpdateKnowledgeSourceProcessing :exec
+UPDATE knowledge_sources SET status = 'processing', error_message = NULL, updated_at = $1
+WHERE workspace_id = $2 AND source_id = $3
+`
+
+type UpdateKnowledgeSourceProcessingParams struct {
+	UpdatedAt   time.Time `db:"updated_at" json:"updated_at"`
+	WorkspaceID string    `db:"workspace_id" json:"workspace_id"`
+	SourceID    string    `db:"source_id" json:"source_id"`
+}
+
+func (q *Queries) UpdateKnowledgeSourceProcessing(ctx context.Context, arg UpdateKnowledgeSourceProcessingParams) error {
+	_, err := q.db.ExecContext(ctx, updateKnowledgeSourceProcessing, arg.UpdatedAt, arg.WorkspaceID, arg.SourceID)
+	return err
+}
+
+const updateKnowledgeSourceResult = `-- name: UpdateKnowledgeSourceResult :exec
+UPDATE knowledge_sources SET status = $1, error_message = $2, updated_at = $3
+WHERE workspace_id = $4 AND source_id = $5
+`
+
+type UpdateKnowledgeSourceResultParams struct {
+	Status       string         `db:"status" json:"status"`
+	ErrorMessage sql.NullString `db:"error_message" json:"error_message"`
+	UpdatedAt    time.Time      `db:"updated_at" json:"updated_at"`
+	WorkspaceID  string         `db:"workspace_id" json:"workspace_id"`
+	SourceID     string         `db:"source_id" json:"source_id"`
+}
+
+func (q *Queries) UpdateKnowledgeSourceResult(ctx context.Context, arg UpdateKnowledgeSourceResultParams) error {
+	_, err := q.db.ExecContext(ctx, updateKnowledgeSourceResult,
+		arg.Status,
+		arg.ErrorMessage,
+		arg.UpdatedAt,
+		arg.WorkspaceID,
+		arg.SourceID,
+	)
 	return err
 }
 

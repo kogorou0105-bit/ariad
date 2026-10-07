@@ -74,6 +74,13 @@ func (r *KnowledgeRepository) SaveSource(
 		SourceID:           source.ID,
 		Title:              source.Title,
 		SourceUrl:          nullableString(source.SourceURL),
+		SourceType:         source.Type,
+		Status:             source.Status,
+		FileName:           nullableString(source.FileName),
+		MediaType:          nullableString(source.MediaType),
+		FileSize:           sql.NullInt64{Int64: source.FileSize, Valid: source.FileName != ""},
+		FileContent:        source.FileContent,
+		ErrorMessage:       nullableString(source.Error),
 		IdempotencyKey:     idempotencyKey,
 		PayloadFingerprint: payloadFingerprint,
 		CreatedAt:          source.CreatedAt,
@@ -112,6 +119,69 @@ func (r *KnowledgeRepository) SaveSource(
 		SourceID:    source.ID,
 		ChunkCount:  len(chunks),
 	}, nil
+}
+
+func sourceFromRow(workspaceID, sourceID, title string, sourceURL sql.NullString, sourceType, status string, fileName, mediaType sql.NullString, fileSize sql.NullInt64, fileContent []byte, errorMessage sql.NullString, createdAt, updatedAt time.Time) knowledge.Source {
+	return knowledge.Source{ID: sourceID, WorkspaceID: workspaceID, Title: title, SourceURL: sourceURL.String, Type: sourceType, Status: status, FileName: fileName.String, MediaType: mediaType.String, FileSize: fileSize.Int64, FileContent: fileContent, Error: errorMessage.String, CreatedAt: createdAt, UpdatedAt: updatedAt}
+}
+
+func (r *KnowledgeRepository) ListSources(ctx context.Context, workspaceID string) ([]knowledge.SourceSummary, error) {
+	rows, err := r.queries.ListKnowledgeSources(ctx, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]knowledge.SourceSummary, 0, len(rows))
+	for _, row := range rows {
+		result = append(result, knowledge.SourceSummary{Source: sourceFromRow(row.WorkspaceID, row.SourceID, row.Title, row.SourceUrl, row.SourceType, row.Status, row.FileName, row.MediaType, row.FileSize, nil, row.ErrorMessage, row.CreatedAt, row.UpdatedAt), ChunkCount: int(row.ChunkCount)})
+	}
+	return result, nil
+}
+
+func (r *KnowledgeRepository) GetSource(ctx context.Context, workspaceID, sourceID string) (knowledge.SourceSummary, bool, error) {
+	row, err := r.queries.GetKnowledgeSource(ctx, dbgen.GetKnowledgeSourceParams{WorkspaceID: workspaceID, SourceID: sourceID})
+	if errors.Is(err, sql.ErrNoRows) {
+		return knowledge.SourceSummary{}, false, nil
+	}
+	if err != nil {
+		return knowledge.SourceSummary{}, false, err
+	}
+	return knowledge.SourceSummary{Source: sourceFromRow(row.WorkspaceID, row.SourceID, row.Title, row.SourceUrl, row.SourceType, row.Status, row.FileName, row.MediaType, row.FileSize, row.FileContent, row.ErrorMessage, row.CreatedAt, row.UpdatedAt), ChunkCount: int(row.ChunkCount)}, true, nil
+}
+
+func (r *KnowledgeRepository) DeleteSource(ctx context.Context, workspaceID, sourceID string) (bool, error) {
+	count, err := r.queries.DeleteKnowledgeSource(ctx, dbgen.DeleteKnowledgeSourceParams{WorkspaceID: workspaceID, SourceID: sourceID})
+	return count > 0, err
+}
+
+func (r *KnowledgeRepository) ReplaceSourceChunks(ctx context.Context, source knowledge.Source, chunks []knowledge.Chunk) error {
+	tx, err := r.database.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	queries := r.queries.WithTx(tx)
+	if err := queries.DeleteKnowledgeSourceChunks(ctx, dbgen.DeleteKnowledgeSourceChunksParams{WorkspaceID: source.WorkspaceID, SourceID: source.ID}); err != nil {
+		return err
+	}
+	for _, chunk := range chunks {
+		ordinal, err := checkedInt32(chunk.Ordinal)
+		if err != nil {
+			return err
+		}
+		if err := queries.InsertKnowledgeChunk(ctx, dbgen.InsertKnowledgeChunkParams{WorkspaceID: source.WorkspaceID, ChunkID: chunk.ID, SourceID: source.ID, Ordinal: ordinal, Text: chunk.Text}); err != nil {
+			return err
+		}
+		if len(chunk.Embedding) > 0 {
+			encoded, _ := json.Marshal(chunk.Embedding)
+			if err := queries.UpsertKnowledgeChunkEmbedding(ctx, dbgen.UpsertKnowledgeChunkEmbeddingParams{WorkspaceID: source.WorkspaceID, ChunkID: chunk.ID, Embedding: string(encoded), UpdatedAt: source.UpdatedAt}); err != nil {
+				return err
+			}
+		}
+	}
+	if err := queries.UpdateKnowledgeSourceResult(ctx, dbgen.UpdateKnowledgeSourceResultParams{Status: source.Status, ErrorMessage: nullableString(source.Error), UpdatedAt: source.UpdatedAt, WorkspaceID: source.WorkspaceID, SourceID: source.ID}); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ListChunks returns the immutable chunks visible to one workspace.

@@ -144,3 +144,88 @@ func (r *MemoryRepository) SaveEmbedding(ctx context.Context, workspaceID, chunk
 	}
 	return errors.New("knowledge chunk not found")
 }
+
+func (r *MemoryRepository) ListSources(ctx context.Context, workspaceID string) ([]SourceSummary, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	result := make([]SourceSummary, 0, len(r.sources[workspaceID]))
+	for _, source := range r.sources[workspaceID] {
+		count := 0
+		for _, chunk := range r.chunks[workspaceID] {
+			if chunk.SourceID == source.ID {
+				count++
+			}
+		}
+		source.FileContent = nil
+		result = append(result, SourceSummary{Source: source, ChunkCount: count})
+	}
+	return result, nil
+}
+
+func (r *MemoryRepository) GetSource(ctx context.Context, workspaceID, sourceID string) (SourceSummary, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return SourceSummary{}, false, err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	source, found := r.sources[workspaceID][sourceID]
+	if !found {
+		return SourceSummary{}, false, nil
+	}
+	count := 0
+	for _, chunk := range r.chunks[workspaceID] {
+		if chunk.SourceID == sourceID {
+			count++
+		}
+	}
+	source.FileContent = append([]byte(nil), source.FileContent...)
+	return SourceSummary{Source: source, ChunkCount: count}, true, nil
+}
+
+func (r *MemoryRepository) DeleteSource(ctx context.Context, workspaceID, sourceID string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, found := r.sources[workspaceID][sourceID]; !found {
+		return false, nil
+	}
+	delete(r.sources[workspaceID], sourceID)
+	filtered := r.chunks[workspaceID][:0]
+	for _, chunk := range r.chunks[workspaceID] {
+		if chunk.SourceID != sourceID {
+			filtered = append(filtered, chunk)
+		}
+	}
+	r.chunks[workspaceID] = filtered
+	for key, record := range r.submissions[workspaceID] {
+		if record.Result.SourceID == sourceID {
+			delete(r.submissions[workspaceID], key)
+		}
+	}
+	return true, nil
+}
+
+func (r *MemoryRepository) ReplaceSourceChunks(ctx context.Context, source Source, chunks []Chunk) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, found := r.sources[source.WorkspaceID][source.ID]; !found {
+		return errors.New("knowledge source not found")
+	}
+	filtered := r.chunks[source.WorkspaceID][:0]
+	for _, chunk := range r.chunks[source.WorkspaceID] {
+		if chunk.SourceID != source.ID {
+			filtered = append(filtered, chunk)
+		}
+	}
+	r.chunks[source.WorkspaceID] = append(filtered, chunks...)
+	r.sources[source.WorkspaceID][source.ID] = source
+	return nil
+}

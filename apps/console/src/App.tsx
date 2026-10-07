@@ -14,12 +14,15 @@ const workspaceID = "ws_dev";
 const adminTokenStorageKey = "ariad:admin_token";
 const adminUnauthorizedEvent = "ariad:admin-unauthorized";
 
-async function getJSON<Response>(path: string): Promise<Response> {
-  const token = sessionStorage.getItem(adminTokenStorageKey);
+async function requestJSON<Response>(
+  path: string,
+  token: string | null,
+  clearTokenOnUnauthorized: boolean,
+): Promise<Response> {
   const response = await fetch(path, {
     headers: token ? { Authorization: `Bearer ${token}` } : undefined,
   });
-  if (response.status === 401) {
+  if (response.status === 401 && clearTokenOnUnauthorized) {
     sessionStorage.removeItem(adminTokenStorageKey);
     window.dispatchEvent(new Event(adminUnauthorizedEvent));
   }
@@ -35,6 +38,10 @@ async function getJSON<Response>(path: string): Promise<Response> {
     throw new Error(failure.error?.message ?? `Request failed (${response.status})`);
   }
   return payload as Response;
+}
+
+function getJSON<Response>(path: string): Promise<Response> {
+  return requestJSON(path, sessionStorage.getItem(adminTokenStorageKey), true);
 }
 
 function formatActivity(value: string): string {
@@ -60,6 +67,12 @@ export function ConsoleShell() {
     return <AdminLoginPage onLogin={() => setAuthenticated(true)} />;
   }
 
+  function logout() {
+    sessionStorage.removeItem(adminTokenStorageKey);
+    queryClient.clear();
+    setAuthenticated(false);
+  }
+
   return (
     <div className="console-shell">
       <aside className="sidebar">
@@ -75,6 +88,7 @@ export function ConsoleShell() {
           <Link className="nav-item" activeProps={{ className: "nav-item nav-item-active" }} to="/conversations">Conversations</Link>
           <span className="nav-item nav-item-disabled">Evaluations</span>
         </nav>
+        <button className="logout-button" type="button" onClick={logout}>Log out</button>
       </aside>
       <main className="main-content" data-surface={surface}>
         <Outlet />
@@ -85,18 +99,33 @@ export function ConsoleShell() {
 
 function AdminLoginPage({ onLogin }: { onLogin: () => void }) {
   const [token, setToken] = useState("");
+  const [error, setError] = useState("");
+  const [pending, setPending] = useState(false);
 
-  function submit(event: FormEvent<HTMLFormElement>) {
+  async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const trimmed = token.trim();
     if (!trimmed) return;
-    sessionStorage.setItem(adminTokenStorageKey, trimmed);
-    onLogin();
+    setError("");
+    setPending(true);
+    try {
+      await requestJSON<ListConversationsResponse>(
+        `/api/v1/conversations?workspace_id=${encodeURIComponent(workspaceID)}`,
+        trimmed,
+        false,
+      );
+      sessionStorage.setItem(adminTokenStorageKey, trimmed);
+      onLogin();
+    } catch (loginError) {
+      setError(loginError instanceof Error ? loginError.message : "Could not sign in.");
+    } finally {
+      setPending(false);
+    }
   }
 
   return (
     <main className="login-page" data-surface={surface}>
-      <form className="login-card" onSubmit={submit}>
+      <form className="login-card" onSubmit={(event) => void submit(event)}>
         <span className="brand-mark">A</span>
         <div className="eyebrow">Ariad Console</div>
         <h1>Administrator access</h1>
@@ -110,7 +139,10 @@ function AdminLoginPage({ onLogin }: { onLogin: () => void }) {
           value={token}
           onChange={(event) => setToken(event.target.value)}
         />
-        <button type="submit" disabled={!token.trim()}>Continue</button>
+        {error && <p className="login-error" role="alert">{error}</p>}
+        <button type="submit" disabled={pending || !token.trim()}>
+          {pending ? "Checking…" : "Continue"}
+        </button>
       </form>
     </main>
   );

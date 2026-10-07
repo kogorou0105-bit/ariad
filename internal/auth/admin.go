@@ -33,7 +33,6 @@ func NewAdminMiddleware(token string, logger *slog.Logger) *AdminMiddleware {
 func (m *AdminMiddleware) RequireAdmin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if !m.authorized(request.Header.Get("Authorization")) {
-			m.logger.Warn("rejected unauthorized management request", "method", request.Method, "path", request.URL.Path)
 			response.Header().Set("Content-Type", "application/json")
 			response.Header().Set("WWW-Authenticate", "Bearer")
 			response.WriteHeader(http.StatusUnauthorized)

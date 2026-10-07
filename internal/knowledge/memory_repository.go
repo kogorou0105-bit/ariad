@@ -13,6 +13,7 @@ type MemoryRepository struct {
 	sources     map[string]map[string]Source
 	chunks      map[string][]Chunk
 	submissions map[string]map[string]SubmissionRecord
+	backfills   map[string]EmbeddingBackfillStatus
 }
 
 // NewMemoryRepository creates an empty in-memory repository.
@@ -21,7 +22,30 @@ func NewMemoryRepository() *MemoryRepository {
 		sources:     make(map[string]map[string]Source),
 		chunks:      make(map[string][]Chunk),
 		submissions: make(map[string]map[string]SubmissionRecord),
+		backfills:   make(map[string]EmbeddingBackfillStatus),
 	}
+}
+
+func (r *MemoryRepository) GetEmbeddingBackfill(ctx context.Context, workspaceID string) (EmbeddingBackfillStatus, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return EmbeddingBackfillStatus{}, false, err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	status, found := r.backfills[workspaceID]
+	status.Failures = append([]EmbeddingFailure(nil), status.Failures...)
+	return status, found, nil
+}
+
+func (r *MemoryRepository) SaveEmbeddingBackfill(ctx context.Context, workspaceID string, status EmbeddingBackfillStatus) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	status.Failures = append([]EmbeddingFailure(nil), status.Failures...)
+	r.mu.Lock()
+	r.backfills[workspaceID] = status
+	r.mu.Unlock()
+	return nil
 }
 
 // FindSubmission finds an idempotent submission inside one workspace.
@@ -104,4 +128,19 @@ func (r *MemoryRepository) ListChunks(
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return append([]Chunk(nil), r.chunks[workspaceID]...), nil
+}
+
+func (r *MemoryRepository) SaveEmbedding(ctx context.Context, workspaceID, chunkID string, embedding []float64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for index := range r.chunks[workspaceID] {
+		if r.chunks[workspaceID][index].ID == chunkID {
+			r.chunks[workspaceID][index].Embedding = append([]float64(nil), embedding...)
+			return nil
+		}
+	}
+	return errors.New("knowledge chunk not found")
 }

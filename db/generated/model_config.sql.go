@@ -7,6 +7,7 @@ package dbgen
 
 import (
 	"context"
+	"database/sql"
 	"time"
 )
 
@@ -20,40 +21,64 @@ func (q *Queries) DeleteWorkspaceModelConfig(ctx context.Context, workspaceID st
 }
 
 const getWorkspaceModelConfig = `-- name: GetWorkspaceModelConfig :one
-SELECT workspace_id, base_url, model, api_key_ciphertext, updated_at
+SELECT workspace_id, base_url, model, api_key_ciphertext, embedding_base_url, embedding_model, embedding_api_key_ciphertext, embedding_threshold, updated_at
 FROM workspace_model_configs
 WHERE workspace_id = $1
 `
 
-func (q *Queries) GetWorkspaceModelConfig(ctx context.Context, workspaceID string) (WorkspaceModelConfig, error) {
+type GetWorkspaceModelConfigRow struct {
+	WorkspaceID               string         `db:"workspace_id" json:"workspace_id"`
+	BaseUrl                   string         `db:"base_url" json:"base_url"`
+	Model                     string         `db:"model" json:"model"`
+	ApiKeyCiphertext          string         `db:"api_key_ciphertext" json:"api_key_ciphertext"`
+	EmbeddingBaseUrl          sql.NullString `db:"embedding_base_url" json:"embedding_base_url"`
+	EmbeddingModel            sql.NullString `db:"embedding_model" json:"embedding_model"`
+	EmbeddingApiKeyCiphertext sql.NullString `db:"embedding_api_key_ciphertext" json:"embedding_api_key_ciphertext"`
+	EmbeddingThreshold        float64        `db:"embedding_threshold" json:"embedding_threshold"`
+	UpdatedAt                 time.Time      `db:"updated_at" json:"updated_at"`
+}
+
+func (q *Queries) GetWorkspaceModelConfig(ctx context.Context, workspaceID string) (GetWorkspaceModelConfigRow, error) {
 	row := q.db.QueryRowContext(ctx, getWorkspaceModelConfig, workspaceID)
-	var i WorkspaceModelConfig
+	var i GetWorkspaceModelConfigRow
 	err := row.Scan(
 		&i.WorkspaceID,
 		&i.BaseUrl,
 		&i.Model,
 		&i.ApiKeyCiphertext,
+		&i.EmbeddingBaseUrl,
+		&i.EmbeddingModel,
+		&i.EmbeddingApiKeyCiphertext,
+		&i.EmbeddingThreshold,
 		&i.UpdatedAt,
 	)
 	return i, err
 }
 
 const upsertWorkspaceModelConfig = `-- name: UpsertWorkspaceModelConfig :exec
-INSERT INTO workspace_model_configs (workspace_id, base_url, model, api_key_ciphertext, updated_at)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO workspace_model_configs (workspace_id, base_url, model, api_key_ciphertext, embedding_base_url, embedding_model, embedding_api_key_ciphertext, embedding_threshold, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 ON CONFLICT (workspace_id) DO UPDATE SET
     base_url = EXCLUDED.base_url,
     model = EXCLUDED.model,
     api_key_ciphertext = EXCLUDED.api_key_ciphertext,
+    embedding_base_url = EXCLUDED.embedding_base_url,
+    embedding_model = EXCLUDED.embedding_model,
+    embedding_api_key_ciphertext = EXCLUDED.embedding_api_key_ciphertext,
+    embedding_threshold = EXCLUDED.embedding_threshold,
     updated_at = EXCLUDED.updated_at
 `
 
 type UpsertWorkspaceModelConfigParams struct {
-	WorkspaceID      string    `db:"workspace_id" json:"workspace_id"`
-	BaseUrl          string    `db:"base_url" json:"base_url"`
-	Model            string    `db:"model" json:"model"`
-	ApiKeyCiphertext string    `db:"api_key_ciphertext" json:"api_key_ciphertext"`
-	UpdatedAt        time.Time `db:"updated_at" json:"updated_at"`
+	WorkspaceID               string         `db:"workspace_id" json:"workspace_id"`
+	BaseUrl                   string         `db:"base_url" json:"base_url"`
+	Model                     string         `db:"model" json:"model"`
+	ApiKeyCiphertext          string         `db:"api_key_ciphertext" json:"api_key_ciphertext"`
+	EmbeddingBaseUrl          sql.NullString `db:"embedding_base_url" json:"embedding_base_url"`
+	EmbeddingModel            sql.NullString `db:"embedding_model" json:"embedding_model"`
+	EmbeddingApiKeyCiphertext sql.NullString `db:"embedding_api_key_ciphertext" json:"embedding_api_key_ciphertext"`
+	EmbeddingThreshold        float64        `db:"embedding_threshold" json:"embedding_threshold"`
+	UpdatedAt                 time.Time      `db:"updated_at" json:"updated_at"`
 }
 
 func (q *Queries) UpsertWorkspaceModelConfig(ctx context.Context, arg UpsertWorkspaceModelConfigParams) error {
@@ -62,6 +87,10 @@ func (q *Queries) UpsertWorkspaceModelConfig(ctx context.Context, arg UpsertWork
 		arg.BaseUrl,
 		arg.Model,
 		arg.ApiKeyCiphertext,
+		arg.EmbeddingBaseUrl,
+		arg.EmbeddingModel,
+		arg.EmbeddingApiKeyCiphertext,
+		arg.EmbeddingThreshold,
 		arg.UpdatedAt,
 	)
 	return err

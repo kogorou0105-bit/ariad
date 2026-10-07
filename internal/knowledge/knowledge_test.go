@@ -5,7 +5,89 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
+
+type fixedKnowledgeEmbedder struct{ fail bool }
+
+func (e *fixedKnowledgeEmbedder) Embed(context.Context, string, string) ([]float64, error) {
+	if e.fail {
+		return nil, errors.New("embedding unavailable")
+	}
+	return []float64{0.25, 0.75}, nil
+}
+
+func TestBackfillEmbeddingsRetriesMissingChunks(t *testing.T) {
+	repository := NewMemoryRepository()
+	service := NewService(repository)
+	_, err := service.SubmitText(context.Background(), SubmitTextCommand{WorkspaceID: "ws", IdempotencyKey: "legacy", Text: "legacy knowledge"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	embedder := &fixedKnowledgeEmbedder{fail: true}
+	service.embedder = embedder
+	first, err := service.BackfillEmbeddings(context.Background(), "ws")
+	if err != nil || first.Failed != 1 || len(first.Failures) != 1 || first.Failures[0].Reason != "embedding unavailable" {
+		t.Fatalf("first = %#v err = %v", first, err)
+	}
+	firstStatus, found, err := repository.GetEmbeddingBackfill(context.Background(), "ws")
+	if err != nil || !found || firstStatus.Status != "completed" || len(firstStatus.Failures) != 1 {
+		t.Fatalf("first status = %#v found = %v err = %v", firstStatus, found, err)
+	}
+	embedder.fail = false
+	second, err := service.BackfillEmbeddings(context.Background(), "ws")
+	if err != nil || second.Completed != 1 || second.Failed != 0 {
+		t.Fatalf("second = %#v err = %v", second, err)
+	}
+	chunks, _ := repository.ListChunks(context.Background(), "ws")
+	if len(chunks[0].Embedding) != 2 {
+		t.Fatalf("embedding = %#v", chunks[0].Embedding)
+	}
+	secondStatus, found, err := repository.GetEmbeddingBackfill(context.Background(), "ws")
+	if err != nil || !found || secondStatus.Status != "completed" || secondStatus.Failed != 0 {
+		t.Fatalf("second status = %#v found = %v err = %v", secondStatus, found, err)
+	}
+}
+
+func TestSubmitTextPersistsWhenEmbeddingFails(t *testing.T) {
+	repository := NewMemoryRepository()
+	var observedChunkID string
+	var observedError error
+	service := NewService(
+		repository,
+		WithEmbedder(&fixedKnowledgeEmbedder{fail: true}),
+		WithEmbeddingErrorHandler(func(_ string, chunkID string, err error) {
+			observedChunkID, observedError = chunkID, err
+		}),
+	)
+	result, err := service.SubmitText(context.Background(), SubmitTextCommand{
+		WorkspaceID: "ws", IdempotencyKey: "embedding-failure", Text: "knowledge remains available",
+	})
+	if err != nil || result.ChunkCount != 1 {
+		t.Fatalf("result = %#v err = %v", result, err)
+	}
+	chunks, err := repository.ListChunks(context.Background(), "ws")
+	if err != nil || len(chunks) != 1 || len(chunks[0].Embedding) != 0 {
+		t.Fatalf("chunks = %#v err = %v", chunks, err)
+	}
+	if observedChunkID != chunks[0].ID || observedError == nil || observedError.Error() != "embedding unavailable" {
+		t.Fatalf("observed chunk = %q error = %v", observedChunkID, observedError)
+	}
+}
+
+func TestEmbeddingBackfillCanRestartAfterStaleLease(t *testing.T) {
+	repository := NewMemoryRepository()
+	now := time.Date(2026, time.October, 7, 12, 0, 0, 0, time.UTC)
+	if err := repository.SaveEmbeddingBackfill(context.Background(), "ws", EmbeddingBackfillStatus{Status: "running", UpdatedAt: now.Add(-embeddingBackfillLease)}); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(repository)
+	service.clock = func() time.Time { return now }
+	status, started, err := service.StartEmbeddingBackfill(context.Background(), "ws")
+	if err != nil || !started || status.Status != "running" || !status.UpdatedAt.Equal(now) {
+		t.Fatalf("status = %#v started = %v err = %v", status, started, err)
+	}
+}
 
 func TestSubmitTextIsIdempotentAndWorkspaceScoped(t *testing.T) {
 	t.Parallel()

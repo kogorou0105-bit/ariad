@@ -56,7 +56,14 @@ func (r *ModelConfigRepository) Get(ctx context.Context, workspaceID string) (mo
 	if err != nil {
 		return modelconfig.Config{}, false, err
 	}
-	return modelconfig.Config{WorkspaceID: row.WorkspaceID, BaseURL: row.BaseUrl, Model: row.Model, APIKey: apiKey, UpdatedAt: row.UpdatedAt}, true, nil
+	embeddingAPIKey := ""
+	if row.EmbeddingApiKeyCiphertext.Valid {
+		embeddingAPIKey, err = r.decrypt(row.EmbeddingApiKeyCiphertext.String, workspaceID+":embedding")
+		if err != nil {
+			return modelconfig.Config{}, false, err
+		}
+	}
+	return modelconfig.Config{WorkspaceID: row.WorkspaceID, BaseURL: row.BaseUrl, Model: row.Model, APIKey: apiKey, EmbeddingBaseURL: row.EmbeddingBaseUrl.String, EmbeddingModel: row.EmbeddingModel.String, EmbeddingAPIKey: embeddingAPIKey, EmbeddingThreshold: row.EmbeddingThreshold, UpdatedAt: row.UpdatedAt}, true, nil
 }
 
 func (r *ModelConfigRepository) Save(ctx context.Context, config modelconfig.Config) error {
@@ -67,9 +74,17 @@ func (r *ModelConfigRepository) Save(ctx context.Context, config modelconfig.Con
 	if err != nil {
 		return err
 	}
+	embeddingCiphertext := sql.NullString{}
+	if config.EmbeddingAPIKey != "" {
+		value, encryptionErr := r.encrypt(config.EmbeddingAPIKey, config.WorkspaceID+":embedding")
+		if encryptionErr != nil {
+			return encryptionErr
+		}
+		embeddingCiphertext = sql.NullString{String: value, Valid: true}
+	}
 	return r.queries.UpsertWorkspaceModelConfig(ctx, dbgen.UpsertWorkspaceModelConfigParams{
 		WorkspaceID: config.WorkspaceID, BaseUrl: config.BaseURL, Model: config.Model,
-		ApiKeyCiphertext: ciphertext, UpdatedAt: config.UpdatedAt,
+		ApiKeyCiphertext: ciphertext, EmbeddingBaseUrl: nullableString(config.EmbeddingBaseURL), EmbeddingModel: nullableString(config.EmbeddingModel), EmbeddingApiKeyCiphertext: embeddingCiphertext, EmbeddingThreshold: config.EmbeddingThreshold, UpdatedAt: config.UpdatedAt,
 	})
 }
 

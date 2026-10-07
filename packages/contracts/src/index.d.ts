@@ -124,6 +124,12 @@ export interface ModelConfigResponse {
   base_url: string;
   model: string;
   api_key_mask: string;
+  embedding_base_url: string;
+  embedding_model: string;
+  embedding_api_key_mask: string;
+  embedding_threshold: number;
+  semantic_enabled: boolean;
+  embedding_health: { attempted: boolean; attempted_at: string; success: boolean; error?: string };
 }
 
 export interface SaveModelConfigRequest {
@@ -131,6 +137,20 @@ export interface SaveModelConfigRequest {
   base_url: string;
   model: string;
   api_key: string;
+  embedding_base_url: string;
+  embedding_model: string;
+  embedding_api_key: string;
+  embedding_threshold: number;
+}
+
+export interface EmbeddingBackfillResponse {
+  status: "idle" | "running" | "completed" | "failed";
+  total: number;
+  completed: number;
+  failed: number;
+  failures?: { chunk_id: string; reason: string }[];
+  error?: string;
+  updated_at?: string;
 }
 
 export interface APIErrorResponse {

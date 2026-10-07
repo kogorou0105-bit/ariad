@@ -54,6 +54,11 @@ INSERT INTO knowledge_chunks (
     sqlc.arg(text)
 );
 
+-- name: UpsertKnowledgeChunkEmbedding :exec
+INSERT INTO knowledge_chunk_embeddings (workspace_id, chunk_id, embedding, updated_at)
+VALUES (sqlc.arg(workspace_id), sqlc.arg(chunk_id), sqlc.arg(embedding), sqlc.arg(updated_at))
+ON CONFLICT (workspace_id, chunk_id) DO UPDATE SET embedding = EXCLUDED.embedding, updated_at = EXCLUDED.updated_at;
+
 -- name: ListKnowledgeChunks :many
 SELECT
     chunk.chunk_id,
@@ -61,10 +66,29 @@ SELECT
     chunk.source_id,
     source.title AS source_title,
     chunk.ordinal,
-    chunk.text
+    chunk.text,
+    embedding.embedding
 FROM knowledge_chunks AS chunk
 JOIN knowledge_sources AS source
     ON source.workspace_id = chunk.workspace_id
     AND source.source_id = chunk.source_id
+LEFT JOIN knowledge_chunk_embeddings AS embedding ON embedding.workspace_id = chunk.workspace_id AND embedding.chunk_id = chunk.chunk_id
 WHERE chunk.workspace_id = sqlc.arg(workspace_id)
 ORDER BY source.created_at, chunk.source_id, chunk.ordinal;
+
+-- name: GetKnowledgeEmbeddingBackfill :one
+SELECT workspace_id, status, total, completed, failed, failures, error, updated_at
+FROM knowledge_embedding_backfills
+WHERE workspace_id = sqlc.arg(workspace_id);
+
+-- name: UpsertKnowledgeEmbeddingBackfill :exec
+INSERT INTO knowledge_embedding_backfills (workspace_id, status, total, completed, failed, failures, error, updated_at)
+VALUES (sqlc.arg(workspace_id), sqlc.arg(status), sqlc.arg(total), sqlc.arg(completed), sqlc.arg(failed), sqlc.arg(failures), sqlc.narg(error), sqlc.arg(updated_at))
+ON CONFLICT (workspace_id) DO UPDATE SET
+    status = EXCLUDED.status,
+    total = EXCLUDED.total,
+    completed = EXCLUDED.completed,
+    failed = EXCLUDED.failed,
+    failures = EXCLUDED.failures,
+    error = EXCLUDED.error,
+    updated_at = EXCLUDED.updated_at;

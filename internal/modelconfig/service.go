@@ -18,26 +18,39 @@ var (
 )
 
 type Config struct {
-	WorkspaceID string
-	BaseURL     string
-	Model       string
-	APIKey      string
-	UpdatedAt   time.Time
+	WorkspaceID        string
+	BaseURL            string
+	Model              string
+	APIKey             string
+	EmbeddingBaseURL   string
+	EmbeddingModel     string
+	EmbeddingAPIKey    string
+	EmbeddingThreshold float64
+	UpdatedAt          time.Time
 }
 
 type SaveCommand struct {
-	WorkspaceID string
-	BaseURL     string
-	Model       string
-	APIKey      string
+	WorkspaceID        string
+	BaseURL            string
+	Model              string
+	APIKey             string
+	EmbeddingBaseURL   string
+	EmbeddingModel     string
+	EmbeddingAPIKey    string
+	EmbeddingThreshold float64
 }
 
 type Status struct {
-	WorkspaceID string
-	Source      string
-	BaseURL     string
-	Model       string
-	APIKeyMask  string
+	WorkspaceID         string
+	Source              string
+	BaseURL             string
+	Model               string
+	APIKeyMask          string
+	EmbeddingBaseURL    string
+	EmbeddingModel      string
+	EmbeddingAPIKeyMask string
+	EmbeddingThreshold  float64
+	SemanticEnabled     bool
 }
 
 type Repository interface {
@@ -95,7 +108,26 @@ func (s *Service) Save(ctx context.Context, command SaveCommand) (Status, error)
 		}
 		apiKey = existing.APIKey
 	}
-	config := Config{WorkspaceID: command.WorkspaceID, BaseURL: baseURL, Model: model, APIKey: apiKey, UpdatedAt: s.clock().UTC()}
+	embeddingBaseURL, embeddingModel, embeddingAPIKey := strings.TrimSpace(command.EmbeddingBaseURL), strings.TrimSpace(command.EmbeddingModel), strings.TrimSpace(command.EmbeddingAPIKey)
+	threshold := command.EmbeddingThreshold
+	if threshold <= 0 || threshold > 1 {
+		threshold = 0.35
+	}
+	if embeddingModel != "" {
+		embeddingBaseURL, embeddingModel, err = validate(embeddingBaseURL, embeddingModel)
+		if err != nil {
+			return Status{}, err
+		}
+		if embeddingAPIKey == "" && found {
+			embeddingAPIKey = existing.EmbeddingAPIKey
+		}
+		if embeddingAPIKey == "" {
+			return Status{}, ErrAPIKeyRequired
+		}
+	} else {
+		embeddingBaseURL, embeddingAPIKey = "", ""
+	}
+	config := Config{WorkspaceID: command.WorkspaceID, BaseURL: baseURL, Model: model, APIKey: apiKey, EmbeddingBaseURL: embeddingBaseURL, EmbeddingModel: embeddingModel, EmbeddingAPIKey: embeddingAPIKey, EmbeddingThreshold: threshold, UpdatedAt: s.clock().UTC()}
 	if err := s.repository.Save(ctx, config); err != nil {
 		return Status{}, fmt.Errorf("save workspace model configuration: %w", err)
 	}
@@ -123,7 +155,7 @@ func validate(rawBaseURL, rawModel string) (string, string, error) {
 }
 
 func statusFromConfig(workspaceID, source string, config Config) Status {
-	return Status{WorkspaceID: workspaceID, Source: source, BaseURL: config.BaseURL, Model: config.Model, APIKeyMask: MaskAPIKey(config.APIKey)}
+	return Status{WorkspaceID: workspaceID, Source: source, BaseURL: config.BaseURL, Model: config.Model, APIKeyMask: MaskAPIKey(config.APIKey), EmbeddingBaseURL: config.EmbeddingBaseURL, EmbeddingModel: config.EmbeddingModel, EmbeddingAPIKeyMask: MaskAPIKey(config.EmbeddingAPIKey), EmbeddingThreshold: config.EmbeddingThreshold, SemanticEnabled: config.EmbeddingModel != ""}
 }
 
 func MaskAPIKey(apiKey string) string {

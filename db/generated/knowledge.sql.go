@@ -11,6 +11,28 @@ import (
 	"time"
 )
 
+const getKnowledgeEmbeddingBackfill = `-- name: GetKnowledgeEmbeddingBackfill :one
+SELECT workspace_id, status, total, completed, failed, failures, error, updated_at
+FROM knowledge_embedding_backfills
+WHERE workspace_id = $1
+`
+
+func (q *Queries) GetKnowledgeEmbeddingBackfill(ctx context.Context, workspaceID string) (KnowledgeEmbeddingBackfill, error) {
+	row := q.db.QueryRowContext(ctx, getKnowledgeEmbeddingBackfill, workspaceID)
+	var i KnowledgeEmbeddingBackfill
+	err := row.Scan(
+		&i.WorkspaceID,
+		&i.Status,
+		&i.Total,
+		&i.Completed,
+		&i.Failed,
+		&i.Failures,
+		&i.Error,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getKnowledgeSubmission = `-- name: GetKnowledgeSubmission :one
 SELECT
     source.source_id,
@@ -159,22 +181,25 @@ SELECT
     chunk.source_id,
     source.title AS source_title,
     chunk.ordinal,
-    chunk.text
+    chunk.text,
+    embedding.embedding
 FROM knowledge_chunks AS chunk
 JOIN knowledge_sources AS source
     ON source.workspace_id = chunk.workspace_id
     AND source.source_id = chunk.source_id
+LEFT JOIN knowledge_chunk_embeddings AS embedding ON embedding.workspace_id = chunk.workspace_id AND embedding.chunk_id = chunk.chunk_id
 WHERE chunk.workspace_id = $1
 ORDER BY source.created_at, chunk.source_id, chunk.ordinal
 `
 
 type ListKnowledgeChunksRow struct {
-	ChunkID     string `db:"chunk_id" json:"chunk_id"`
-	WorkspaceID string `db:"workspace_id" json:"workspace_id"`
-	SourceID    string `db:"source_id" json:"source_id"`
-	SourceTitle string `db:"source_title" json:"source_title"`
-	Ordinal     int32  `db:"ordinal" json:"ordinal"`
-	Text        string `db:"text" json:"text"`
+	ChunkID     string         `db:"chunk_id" json:"chunk_id"`
+	WorkspaceID string         `db:"workspace_id" json:"workspace_id"`
+	SourceID    string         `db:"source_id" json:"source_id"`
+	SourceTitle string         `db:"source_title" json:"source_title"`
+	Ordinal     int32          `db:"ordinal" json:"ordinal"`
+	Text        string         `db:"text" json:"text"`
+	Embedding   sql.NullString `db:"embedding" json:"embedding"`
 }
 
 func (q *Queries) ListKnowledgeChunks(ctx context.Context, workspaceID string) ([]ListKnowledgeChunksRow, error) {
@@ -193,6 +218,7 @@ func (q *Queries) ListKnowledgeChunks(ctx context.Context, workspaceID string) (
 			&i.SourceTitle,
 			&i.Ordinal,
 			&i.Text,
+			&i.Embedding,
 		); err != nil {
 			return nil, err
 		}
@@ -221,5 +247,66 @@ type LockKnowledgeSubmissionParams struct {
 
 func (q *Queries) LockKnowledgeSubmission(ctx context.Context, arg LockKnowledgeSubmissionParams) error {
 	_, err := q.db.ExecContext(ctx, lockKnowledgeSubmission, arg.WorkspaceID, arg.IdempotencyKey)
+	return err
+}
+
+const upsertKnowledgeChunkEmbedding = `-- name: UpsertKnowledgeChunkEmbedding :exec
+INSERT INTO knowledge_chunk_embeddings (workspace_id, chunk_id, embedding, updated_at)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (workspace_id, chunk_id) DO UPDATE SET embedding = EXCLUDED.embedding, updated_at = EXCLUDED.updated_at
+`
+
+type UpsertKnowledgeChunkEmbeddingParams struct {
+	WorkspaceID string    `db:"workspace_id" json:"workspace_id"`
+	ChunkID     string    `db:"chunk_id" json:"chunk_id"`
+	Embedding   string    `db:"embedding" json:"embedding"`
+	UpdatedAt   time.Time `db:"updated_at" json:"updated_at"`
+}
+
+func (q *Queries) UpsertKnowledgeChunkEmbedding(ctx context.Context, arg UpsertKnowledgeChunkEmbeddingParams) error {
+	_, err := q.db.ExecContext(ctx, upsertKnowledgeChunkEmbedding,
+		arg.WorkspaceID,
+		arg.ChunkID,
+		arg.Embedding,
+		arg.UpdatedAt,
+	)
+	return err
+}
+
+const upsertKnowledgeEmbeddingBackfill = `-- name: UpsertKnowledgeEmbeddingBackfill :exec
+INSERT INTO knowledge_embedding_backfills (workspace_id, status, total, completed, failed, failures, error, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+ON CONFLICT (workspace_id) DO UPDATE SET
+    status = EXCLUDED.status,
+    total = EXCLUDED.total,
+    completed = EXCLUDED.completed,
+    failed = EXCLUDED.failed,
+    failures = EXCLUDED.failures,
+    error = EXCLUDED.error,
+    updated_at = EXCLUDED.updated_at
+`
+
+type UpsertKnowledgeEmbeddingBackfillParams struct {
+	WorkspaceID string         `db:"workspace_id" json:"workspace_id"`
+	Status      string         `db:"status" json:"status"`
+	Total       int32          `db:"total" json:"total"`
+	Completed   int32          `db:"completed" json:"completed"`
+	Failed      int32          `db:"failed" json:"failed"`
+	Failures    string         `db:"failures" json:"failures"`
+	Error       sql.NullString `db:"error" json:"error"`
+	UpdatedAt   time.Time      `db:"updated_at" json:"updated_at"`
+}
+
+func (q *Queries) UpsertKnowledgeEmbeddingBackfill(ctx context.Context, arg UpsertKnowledgeEmbeddingBackfillParams) error {
+	_, err := q.db.ExecContext(ctx, upsertKnowledgeEmbeddingBackfill,
+		arg.WorkspaceID,
+		arg.Status,
+		arg.Total,
+		arg.Completed,
+		arg.Failed,
+		arg.Failures,
+		arg.Error,
+		arg.UpdatedAt,
+	)
 	return err
 }

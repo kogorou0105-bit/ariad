@@ -172,9 +172,21 @@ func newRouterWithAllServices(
 	authService *auth.Service,
 	visitorService *visitor.Service,
 ) http.Handler {
-	knowledgeService := knowledge.NewService(knowledgeRepository)
+	environmentEmbedder, embedderErr := platformmodel.NewEmbedderFromEnvironment()
+	if embedderErr != nil {
+		panic(fmt.Errorf("configure embedding adapter: %w", embedderErr))
+	}
+	modelConfigService := modelconfig.NewService(modelConfigRepository, fallbackModelConfig)
+	embedder := platformmodel.NewWorkspaceEmbedder(modelConfigService, environmentEmbedder)
+	knowledgeService := knowledge.NewService(
+		knowledgeRepository,
+		knowledge.WithEmbedder(embedder),
+		knowledge.WithEmbeddingErrorHandler(func(workspaceID, chunkID string, err error) {
+			logger.Warn("knowledge embedding failed; source retained for lexical retrieval", "workspace_id", workspaceID, "chunk_id", chunkID, "error", err)
+		}),
+	)
 	ingestionService := ingestion.NewService(pageFetcher, knowledgeService)
-	retrievalService := retrieval.NewService(knowledgeService)
+	retrievalService := retrieval.NewService(knowledgeService, retrieval.WithEmbedder(embedder), retrieval.WithSemanticThresholdProvider(embedder), retrieval.WithEmbeddingErrorHandler(func(err error) { logger.Warn("semantic retrieval unavailable; lexical fallback used", "error", err) }))
 	agentReader := agent.NewStaticReader([]agent.PublishedAgent{{
 		WorkspaceID: developmentWorkspaceID,
 		AgentID:     developmentAgentID,
@@ -183,7 +195,6 @@ func newRouterWithAllServices(
 		Instructions: "Answer only from the supplied evidence. " +
 			"Never invent facts and cite every factual answer.",
 	}})
-	modelConfigService := modelconfig.NewService(modelConfigRepository, fallbackModelConfig)
 	reviewService := review.NewService(reviewRepository)
 	runtimeService := runtime.NewService(agentReader, retrievalService, platformmodel.NewWorkspaceModel(modelConfigService, modelAdapter))
 	conversationService := conversation.NewService(
@@ -208,7 +219,11 @@ func newConfiguredRouter(
 	modelConfigEncryptionKey string,
 ) (http.Handler, func() error, error) {
 	environmentModel := platformmodel.SettingsFromEnvironment()
-	fallbackConfig := modelconfig.Config{BaseURL: environmentModel.BaseURL, Model: environmentModel.Model, APIKey: environmentModel.APIKey}
+	fallbackConfig := modelconfig.Config{
+		BaseURL: environmentModel.BaseURL, Model: environmentModel.Model, APIKey: environmentModel.APIKey,
+		EmbeddingBaseURL: environmentModel.BaseURL, EmbeddingModel: platformmodel.EmbeddingModelFromEnvironment(),
+		EmbeddingAPIKey: environmentModel.APIKey, EmbeddingThreshold: 0.35,
+	}
 	if environmentModel.APIKey == "" {
 		fallbackConfig = modelconfig.Config{Model: "grounded-v1"}
 	}
@@ -320,10 +335,81 @@ func newRouterWithServices(
 			management.Get("/api/v1/model-config", handlers.getModelConfig)
 			management.Put("/api/v1/model-config", handlers.saveModelConfig)
 			management.Delete("/api/v1/model-config", handlers.resetModelConfig)
+			management.Post("/api/v1/knowledge/embeddings/backfill", handlers.startEmbeddingBackfill)
+			management.Get("/api/v1/knowledge/embeddings/backfill", handlers.getEmbeddingBackfill)
 		})
 	})
 
 	return router
+}
+
+type embeddingBackfillStatus struct {
+	Status    string                     `json:"status"`
+	Total     int                        `json:"total"`
+	Completed int                        `json:"completed"`
+	Failed    int                        `json:"failed"`
+	Failures  []embeddingBackfillFailure `json:"failures,omitempty"`
+	Error     string                     `json:"error,omitempty"`
+	UpdatedAt *time.Time                 `json:"updated_at,omitempty"`
+}
+
+type embeddingBackfillFailure struct {
+	ChunkID string `json:"chunk_id"`
+	Reason  string `json:"reason"`
+}
+
+func (h apiHandlers) startEmbeddingBackfill(response http.ResponseWriter, request *http.Request) {
+	requestID := middleware.GetReqID(request.Context())
+	if request.URL.Query().Get("workspace_id") != h.scope.workspaceID {
+		h.writeError(response, http.StatusForbidden, "workspace_not_allowed", "unknown workspace", requestID)
+		return
+	}
+	current, started, err := h.knowledge.StartEmbeddingBackfill(request.Context(), h.scope.workspaceID)
+	if err != nil {
+		h.writeError(response, http.StatusInternalServerError, "internal_error", "could not start embedding backfill", requestID)
+		return
+	}
+	if !started {
+		h.writeJSON(response, http.StatusAccepted, embeddingBackfillStatusFromDomain(current))
+		return
+	}
+	go func() {
+		if _, backfillErr := h.knowledge.BackfillEmbeddings(context.Background(), h.scope.workspaceID); backfillErr != nil {
+			h.logger.Error("embedding backfill failed", "workspace_id", h.scope.workspaceID, "error", backfillErr)
+		}
+	}()
+	h.writeJSON(response, http.StatusAccepted, embeddingBackfillStatusFromDomain(current))
+}
+
+func (h apiHandlers) getEmbeddingBackfill(response http.ResponseWriter, request *http.Request) {
+	requestID := middleware.GetReqID(request.Context())
+	if request.URL.Query().Get("workspace_id") != h.scope.workspaceID {
+		h.writeError(response, http.StatusForbidden, "workspace_not_allowed", "unknown workspace", requestID)
+		return
+	}
+	status, found, err := h.knowledge.GetEmbeddingBackfill(request.Context(), h.scope.workspaceID)
+	if err != nil {
+		h.writeError(response, http.StatusInternalServerError, "internal_error", "could not load embedding backfill", requestID)
+		return
+	}
+	if !found {
+		h.writeJSON(response, http.StatusOK, embeddingBackfillStatus{Status: "idle"})
+		return
+	}
+	h.writeJSON(response, http.StatusOK, embeddingBackfillStatusFromDomain(status))
+}
+
+func embeddingBackfillStatusFromDomain(status knowledge.EmbeddingBackfillStatus) embeddingBackfillStatus {
+	failures := make([]embeddingBackfillFailure, 0, len(status.Failures))
+	for _, failure := range status.Failures {
+		failures = append(failures, embeddingBackfillFailure{ChunkID: failure.ChunkID, Reason: failure.Reason})
+	}
+	var updatedAt *time.Time
+	if !status.UpdatedAt.IsZero() {
+		value := status.UpdatedAt
+		updatedAt = &value
+	}
+	return embeddingBackfillStatus{Status: status.Status, Total: status.Total, Completed: status.Completed, Failed: status.Failed, Failures: failures, Error: status.Error, UpdatedAt: updatedAt}
 }
 
 type apiHandlers struct {
@@ -770,18 +856,28 @@ type listConversationsResponse struct {
 }
 
 type modelConfigRequest struct {
-	WorkspaceID string `json:"workspace_id"`
-	BaseURL     string `json:"base_url"`
-	Model       string `json:"model"`
-	APIKey      string `json:"api_key"`
+	WorkspaceID        string  `json:"workspace_id"`
+	BaseURL            string  `json:"base_url"`
+	Model              string  `json:"model"`
+	APIKey             string  `json:"api_key"`
+	EmbeddingBaseURL   string  `json:"embedding_base_url"`
+	EmbeddingModel     string  `json:"embedding_model"`
+	EmbeddingAPIKey    string  `json:"embedding_api_key"`
+	EmbeddingThreshold float64 `json:"embedding_threshold"`
 }
 
 type modelConfigResponse struct {
-	WorkspaceID string `json:"workspace_id"`
-	Source      string `json:"source"`
-	BaseURL     string `json:"base_url"`
-	Model       string `json:"model"`
-	APIKeyMask  string `json:"api_key_mask"`
+	WorkspaceID         string                        `json:"workspace_id"`
+	Source              string                        `json:"source"`
+	BaseURL             string                        `json:"base_url"`
+	Model               string                        `json:"model"`
+	APIKeyMask          string                        `json:"api_key_mask"`
+	EmbeddingBaseURL    string                        `json:"embedding_base_url"`
+	EmbeddingModel      string                        `json:"embedding_model"`
+	EmbeddingAPIKeyMask string                        `json:"embedding_api_key_mask"`
+	EmbeddingThreshold  float64                       `json:"embedding_threshold"`
+	SemanticEnabled     bool                          `json:"semantic_enabled"`
+	EmbeddingHealth     platformmodel.EmbeddingHealth `json:"embedding_health"`
 }
 
 func (h apiHandlers) submitQuestion(response http.ResponseWriter, request *http.Request) {
@@ -1167,7 +1263,7 @@ func (h apiHandlers) saveModelConfig(response http.ResponseWriter, request *http
 		return
 	}
 	status, err := h.modelConfig.Save(request.Context(), modelconfig.SaveCommand{
-		WorkspaceID: h.scope.workspaceID, BaseURL: input.BaseURL, Model: input.Model, APIKey: input.APIKey,
+		WorkspaceID: h.scope.workspaceID, BaseURL: input.BaseURL, Model: input.Model, APIKey: input.APIKey, EmbeddingBaseURL: input.EmbeddingBaseURL, EmbeddingModel: input.EmbeddingModel, EmbeddingAPIKey: input.EmbeddingAPIKey, EmbeddingThreshold: input.EmbeddingThreshold,
 	})
 	if err != nil {
 		switch {
@@ -1203,7 +1299,7 @@ func (h apiHandlers) resetModelConfig(response http.ResponseWriter, request *htt
 }
 
 func modelConfigResponseFromStatus(status modelconfig.Status) modelConfigResponse {
-	return modelConfigResponse{WorkspaceID: status.WorkspaceID, Source: status.Source, BaseURL: status.BaseURL, Model: status.Model, APIKeyMask: status.APIKeyMask}
+	return modelConfigResponse{WorkspaceID: status.WorkspaceID, Source: status.Source, BaseURL: status.BaseURL, Model: status.Model, APIKeyMask: status.APIKeyMask, EmbeddingBaseURL: status.EmbeddingBaseURL, EmbeddingModel: status.EmbeddingModel, EmbeddingAPIKeyMask: status.EmbeddingAPIKeyMask, EmbeddingThreshold: status.EmbeddingThreshold, SemanticEnabled: status.SemanticEnabled, EmbeddingHealth: platformmodel.GetEmbeddingHealth(status.WorkspaceID)}
 }
 
 func citationResponses(citations []conversation.Citation) []citationResponse {

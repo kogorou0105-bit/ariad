@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -172,19 +173,24 @@ func testWorkspaceModelConfigs(t *testing.T, database *sql.DB, repository *Model
 	t.Helper()
 	ctx := context.Background()
 	secret := "database-workspace-secret"
-	config := modelconfig.Config{WorkspaceID: "ws_model", BaseURL: "https://model.example/v1", Model: "custom", APIKey: secret, UpdatedAt: time.Now().UTC()}
+	embeddingSecret := "database-embedding-secret"
+	config := modelconfig.Config{
+		WorkspaceID: "ws_model", BaseURL: "https://model.example/v1", Model: "custom", APIKey: secret,
+		EmbeddingBaseURL: "https://embedding.example/v1", EmbeddingModel: "embedding-custom",
+		EmbeddingAPIKey: embeddingSecret, EmbeddingThreshold: 0.42, UpdatedAt: time.Now().UTC(),
+	}
 	if err := repository.Save(ctx, config); err != nil {
 		t.Fatalf("save model config: %v", err)
 	}
-	var ciphertext string
-	if err := database.QueryRowContext(ctx, "SELECT api_key_ciphertext FROM workspace_model_configs WHERE workspace_id = $1", config.WorkspaceID).Scan(&ciphertext); err != nil {
+	var ciphertext, embeddingCiphertext string
+	if err := database.QueryRowContext(ctx, "SELECT api_key_ciphertext, embedding_api_key_ciphertext FROM workspace_model_configs WHERE workspace_id = $1", config.WorkspaceID).Scan(&ciphertext, &embeddingCiphertext); err != nil {
 		t.Fatalf("read ciphertext: %v", err)
 	}
-	if ciphertext == secret || strings.Contains(ciphertext, secret) {
+	if ciphertext == secret || strings.Contains(ciphertext, secret) || embeddingCiphertext == embeddingSecret || strings.Contains(embeddingCiphertext, embeddingSecret) {
 		t.Fatal("API key was stored in plaintext")
 	}
 	loaded, found, err := repository.Get(ctx, config.WorkspaceID)
-	if err != nil || !found || loaded.APIKey != secret {
+	if err != nil || !found || loaded.APIKey != secret || loaded.EmbeddingAPIKey != embeddingSecret || loaded.EmbeddingModel != config.EmbeddingModel || loaded.EmbeddingThreshold != config.EmbeddingThreshold {
 		t.Fatalf("loaded = %#v, found = %v, err = %v", loaded, found, err)
 	}
 	if _, found, err := repository.Get(ctx, "ws_model_other"); err != nil || found {
@@ -360,6 +366,7 @@ func testWorkspaceIsolation(
 		SourceTitle: source.Title,
 		Ordinal:     0,
 		Text:        "Workspace A only",
+		Embedding:   []float64{0.25, 0.75},
 	}}
 	if _, err := knowledgeRepository.SaveSource(
 		ctx,
@@ -377,6 +384,27 @@ func testWorkspaceIsolation(
 	}
 	if len(otherChunks) != 0 {
 		t.Fatalf("other workspace exposed %d chunks", len(otherChunks))
+	}
+	storedChunks, err := knowledgeRepository.ListChunks(ctx, source.WorkspaceID)
+	if err != nil {
+		t.Fatalf("list stored workspace chunks: %v", err)
+	}
+	if len(storedChunks) != 1 || !reflect.DeepEqual(storedChunks[0].Embedding, chunks[0].Embedding) {
+		t.Fatalf("stored embedding = %#v, want %#v", storedChunks, chunks[0].Embedding)
+	}
+	backfill := knowledge.EmbeddingBackfillStatus{
+		Status: "completed", Total: 2, Completed: 1, Failed: 1,
+		Failures: []knowledge.EmbeddingFailure{{ChunkID: "chk_failed", Reason: "provider unavailable"}}, UpdatedAt: time.Now().UTC(),
+	}
+	if err := knowledgeRepository.SaveEmbeddingBackfill(ctx, source.WorkspaceID, backfill); err != nil {
+		t.Fatalf("save embedding backfill: %v", err)
+	}
+	storedBackfill, found, err := knowledgeRepository.GetEmbeddingBackfill(ctx, source.WorkspaceID)
+	if err != nil || !found || !reflect.DeepEqual(storedBackfill.Failures, backfill.Failures) || storedBackfill.Failed != 1 {
+		t.Fatalf("stored backfill = %#v found = %v err = %v", storedBackfill, found, err)
+	}
+	if _, found, err := knowledgeRepository.GetEmbeddingBackfill(ctx, "ws_isolation_b"); err != nil || found {
+		t.Fatalf("other workspace backfill found = %v err = %v", found, err)
 	}
 	turn, fact := testTurn("isolation", "ws_isolation_a", "conv_isolation", "visitor_isolation")
 	if _, err := conversationRepository.SaveTurn(

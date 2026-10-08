@@ -20,9 +20,10 @@ const (
 
 // Query is a tenant-scoped evidence search request.
 type Query struct {
-	WorkspaceID string
-	Question    string
-	Limit       int
+	WorkspaceID  string
+	Question     string
+	Limit        int
+	MinimumScore *float64
 }
 
 // Evidence is a server-created view of a relevant knowledge chunk.
@@ -148,6 +149,15 @@ func (s *Service) Retrieve(ctx context.Context, query Query) ([]Evidence, error)
 			Text:        chunk.Text,
 			Score:       lexicalWeight*lexical + semanticWeight*semanticScore,
 		})
+	}
+	if query.MinimumScore != nil {
+		filtered := evidence[:0]
+		for _, item := range evidence {
+			if item.Score >= *query.MinimumScore {
+				filtered = append(filtered, item)
+			}
+		}
+		evidence = filtered
 	}
 
 	sort.SliceStable(evidence, func(left, right int) bool {

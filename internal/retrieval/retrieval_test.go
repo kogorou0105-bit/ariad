@@ -54,6 +54,25 @@ func TestNormalizedCosineMatchesLexicalScoreRange(t *testing.T) {
 	}
 }
 
+func TestMinimumScoreOverridesOnlyOneRetrievalRequest(t *testing.T) {
+	repository := knowledge.NewMemoryRepository()
+	knowledgeService := knowledge.NewService(repository)
+	_, err := knowledgeService.SubmitText(context.Background(), knowledge.SubmitTextCommand{WorkspaceID: "ws", IdempotencyKey: "policy", Title: "Policy", Text: "refund policy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(repository)
+	high := .36
+	filtered, err := service.Retrieve(context.Background(), Query{WorkspaceID: "ws", Question: "refund", MinimumScore: &high})
+	if err != nil || len(filtered) != 0 {
+		t.Fatalf("filtered = %#v err = %v", filtered, err)
+	}
+	unfiltered, err := service.Retrieve(context.Background(), Query{WorkspaceID: "ws", Question: "refund"})
+	if err != nil || len(unfiltered) != 1 {
+		t.Fatalf("unfiltered = %#v err = %v", unfiltered, err)
+	}
+}
+
 func TestSemanticRetrievalMatchesParaphraseAndCrossLanguage(t *testing.T) {
 	repository := knowledge.NewMemoryRepository()
 	service := NewService(repository, WithEmbedder(semanticTestEmbedder{}))

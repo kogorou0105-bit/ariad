@@ -42,6 +42,18 @@ export interface KnowledgeSource {
 export interface ListKnowledgeSourcesResponse { workspace_id: string; sources: KnowledgeSource[]; }
 export interface UploadKnowledgeFilesResponse { sources: KnowledgeSource[]; }
 
+export interface PlaygroundAskRequest { workspace_id: string; question: string; top_k: number; threshold: number; locale: string; }
+export interface PlaygroundHit { evidence_id: string; source_id: string; chunk_id: string; source_title: string; text: string; score: number; }
+export interface PlaygroundAskResponse {
+  outcome: "answered" | "no_matches";
+  answer: string;
+  hits: PlaygroundHit[];
+  hit_count: number;
+  duration_ms: number;
+  retrieval_duration_ms: number;
+  model_duration_ms: number;
+}
+
 export interface SubmitURLRequest {
   workspace_id: string;
   url: string;

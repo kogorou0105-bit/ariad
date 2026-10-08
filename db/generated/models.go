@@ -83,6 +83,41 @@ type ConversationState struct {
 	UpdatedAt          time.Time    `db:"updated_at" json:"updated_at"`
 }
 
+type EvaluationRun struct {
+	WorkspaceID        string          `db:"workspace_id" json:"workspace_id"`
+	RunID              string          `db:"run_id" json:"run_id"`
+	SetID              string          `db:"set_id" json:"set_id"`
+	SetName            string          `db:"set_name" json:"set_name"`
+	TopK               int32           `db:"top_k" json:"top_k"`
+	Threshold          float64         `db:"threshold" json:"threshold"`
+	TotalCount         int32           `db:"total_count" json:"total_count"`
+	EvaluableCount     int32           `db:"evaluable_count" json:"evaluable_count"`
+	PassedCount        int32           `db:"passed_count" json:"passed_count"`
+	SourceMissingCount int32           `db:"source_missing_count" json:"source_missing_count"`
+	PassRate           float64         `db:"pass_rate" json:"pass_rate"`
+	Results            json.RawMessage `db:"results" json:"results"`
+	CreatedAt          time.Time       `db:"created_at" json:"created_at"`
+}
+
+type EvaluationTestCase struct {
+	WorkspaceID      string    `db:"workspace_id" json:"workspace_id"`
+	CaseID           string    `db:"case_id" json:"case_id"`
+	SetID            string    `db:"set_id" json:"set_id"`
+	Question         string    `db:"question" json:"question"`
+	ExpectedSourceID string    `db:"expected_source_id" json:"expected_source_id"`
+	Note             string    `db:"note" json:"note"`
+	CreatedAt        time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt        time.Time `db:"updated_at" json:"updated_at"`
+}
+
+type EvaluationTestSet struct {
+	WorkspaceID string    `db:"workspace_id" json:"workspace_id"`
+	SetID       string    `db:"set_id" json:"set_id"`
+	Name        string    `db:"name" json:"name"`
+	CreatedAt   time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt   time.Time `db:"updated_at" json:"updated_at"`
+}
+
 type KnowledgeChunk struct {
 	WorkspaceID string `db:"workspace_id" json:"workspace_id"`
 	ChunkID     string `db:"chunk_id" json:"chunk_id"`

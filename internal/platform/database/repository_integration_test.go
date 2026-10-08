@@ -14,6 +14,7 @@ import (
 
 	"ariad/internal/auth"
 	"ariad/internal/conversation"
+	"ariad/internal/evaluation"
 	"ariad/internal/knowledge"
 	"ariad/internal/modelconfig"
 	"ariad/internal/review"
@@ -38,6 +39,7 @@ func TestPostgresRepositories(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create model config repository: %v", err)
 	}
+	evaluationRepository := NewEvaluationRepository(database)
 
 	t.Run("isolates workspaces", func(t *testing.T) {
 		testWorkspaceIsolation(t, knowledgeRepository, conversationRepository)
@@ -59,6 +61,9 @@ func TestPostgresRepositories(t *testing.T) {
 	})
 	t.Run("persists isolated review lifecycle", func(t *testing.T) {
 		testReviewLifecycle(t, conversationRepository, reviewRepository)
+	})
+	t.Run("persists evaluation sets and run snapshots", func(t *testing.T) {
+		testEvaluationPersistence(t, evaluationRepository)
 	})
 	t.Run("persists administrator accounts and sessions", func(t *testing.T) {
 		testAdministratorSessions(t, database, authRepository)
@@ -305,6 +310,38 @@ func testListConversationTurns(t *testing.T, repository *ConversationRepository)
 	}
 	if len(otherVisitor) != 0 {
 		t.Fatalf("other visitor turns = %#v, want empty", otherVisitor)
+	}
+}
+
+func testEvaluationPersistence(t *testing.T, repository *EvaluationRepository) {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	set := evaluation.TestSet{WorkspaceID: "ws_evaluation", ID: "set_1", Name: "Regression", CreatedAt: now, UpdatedAt: now}
+	if err := repository.CreateSet(ctx, set); err != nil {
+		t.Fatal(err)
+	}
+	item := evaluation.TestCase{WorkspaceID: set.WorkspaceID, ID: "case_1", SetID: set.ID, Question: "Refund?", ExpectedSourceID: "source_1", Note: "billing", CreatedAt: now, UpdatedAt: now}
+	if err := repository.CreateCase(ctx, item); err != nil {
+		t.Fatal(err)
+	}
+	loaded, found, err := repository.GetSet(ctx, set.WorkspaceID, set.ID)
+	if err != nil || !found || len(loaded.Cases) != 1 || loaded.Cases[0].ExpectedSourceID != "source_1" {
+		t.Fatalf("loaded set = %#v found=%v err=%v", loaded, found, err)
+	}
+	run := evaluation.Run{WorkspaceID: set.WorkspaceID, ID: "run_1", SetID: set.ID, SetName: set.Name, TopK: 5, Threshold: .35, TotalCount: 1, EvaluableCount: 1, PassedCount: 0, SourceMissingCount: 0, PassRate: 0, CreatedAt: now, Results: []evaluation.CaseResult{{CaseID: item.ID, Question: item.Question, ExpectedSourceID: item.ExpectedSourceID, ExpectedSourceTitle: "Refund policy", Outcome: "failed", Hits: []evaluation.Hit{{SourceID: "other", SourceTitle: "Other", Score: .7}}}}}
+	if err := repository.SaveRun(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	stored, found, err := repository.GetRun(ctx, set.WorkspaceID, run.ID)
+	if err != nil || !found || len(stored.Results) != 1 || len(stored.Results[0].Hits) != 1 {
+		t.Fatalf("stored run = %#v found=%v err=%v", stored, found, err)
+	}
+	if deleted, err := repository.DeleteSet(ctx, set.WorkspaceID, set.ID); err != nil || !deleted {
+		t.Fatalf("delete set = %v, %v", deleted, err)
+	}
+	if _, found, err := repository.GetRun(ctx, set.WorkspaceID, run.ID); err != nil || !found {
+		t.Fatalf("run snapshot did not survive set deletion: found=%v err=%v", found, err)
 	}
 }
 

@@ -154,6 +154,21 @@ and retrieval/model/total latency. `top-k` and minimum relevance are request-loc
 not change workspace retrieval settings. The browser keeps the latest 20 runs in local storage for
 comparison; clearing browser storage or using another browser removes that history.
 
+### Retrieval evaluations
+
+Open **Evaluations** in Console to create reusable test sets. Each test case contains a question,
+an expected knowledge source, and an optional note. A run executes the existing retrieval pipeline
+only—it never calls the answer model—and passes a case when at least one of the top-k chunks belongs
+to the expected source. Deleted expected sources are reported separately as **Source missing**.
+
+Runs can override top-k (1–20) and minimum relevance (0–1) without changing workspace settings.
+Every run persists an immutable snapshot of its parameters, pass rate, failed cases, actual source
+hits, and relevance scores. Cases whose expected source was deleted are excluded from the pass-rate
+denominator and reported through separate evaluable and source-missing counts. Semantic retrieval must be configured with an embedding model and API
+key before a run can start. Apply migration `000009_evaluations.sql` before using evaluations
+with PostgreSQL. Real retrieval quality depends on the configured embedding provider and should be
+validated with representative production documents after deployment.
+
 As a system-default alternative, set `ARIAD_EMBEDDING_MODEL` together with
 `ARIAD_MODEL_BASE_URL` and `ARIAD_MODEL_API_KEY`. A local OpenAI-compatible provider works too;
 for example, Ollama can use a Base URL such as `http://localhost:11434/v1`, an installed embedding

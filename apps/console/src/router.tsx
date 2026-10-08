@@ -7,6 +7,7 @@ import { KnowledgeSourceDetailPage, KnowledgeSourcesPage } from "./pages/Knowled
 import { PlaygroundPage } from "./pages/PlaygroundPage";
 import { ModelConfigPage } from "./pages/ModelConfigPage";
 import { ReviewDetailPage, ReviewQueuePage } from "./pages/ReviewPages";
+import { EvaluationsPage } from "./pages/EvaluationsPage";
 
 const rootRoute = createRootRoute({ component: ConsoleShell });
 const indexRoute = createRoute({
@@ -36,7 +37,8 @@ const modelConfigRoute = createRoute({ getParentRoute: () => rootRoute, path: "/
 const reviewsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/reviews", component: ReviewQueuePage });
 const reviewDetailRoute = createRoute({ getParentRoute: () => rootRoute, path: "/reviews/$conversationId", validateSearch: (search: Record<string, unknown>) => ({ visitorId: typeof search.visitorId === "string" ? search.visitorId : "" }), component: ReviewDetailPage });
 const administratorsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/settings/administrators", component: AdministratorsPage });
-const routeTree = rootRoute.addChildren([indexRoute, knowledgeRoute, knowledgeDetailRoute, playgroundRoute, conversationsRoute, conversationDetailRoute, visitorsRoute, reviewsRoute, reviewDetailRoute, modelConfigRoute, administratorsRoute]);
+const evaluationsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/evaluations", component: EvaluationsPage });
+const routeTree = rootRoute.addChildren([indexRoute, knowledgeRoute, knowledgeDetailRoute, playgroundRoute, evaluationsRoute, conversationsRoute, conversationDetailRoute, visitorsRoute, reviewsRoute, reviewDetailRoute, modelConfigRoute, administratorsRoute]);
 
 export const router = createRouter({ routeTree });
 

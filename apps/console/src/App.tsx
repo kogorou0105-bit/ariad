@@ -54,7 +54,7 @@ export function ConsoleShell() {
           <Link className="nav-item" activeProps={{ className: "nav-item nav-item-active" }} to="/reviews">Review queue</Link>
           <Link className="nav-item" activeProps={{ className: "nav-item nav-item-active" }} to="/settings/model">Model configuration</Link>
           <Link className="nav-item" activeProps={{ className: "nav-item nav-item-active" }} to="/settings/administrators">Administrators</Link>
-          <span className="nav-item nav-item-disabled">Evaluations</span>
+          <Link className="nav-item" activeProps={{ className: "nav-item nav-item-active" }} to="/evaluations">Evaluations</Link>
         </nav>
         <button className="logout-button" type="button" onClick={() => void logout()}>Log out</button>
       </aside>

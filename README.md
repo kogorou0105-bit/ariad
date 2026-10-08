@@ -146,6 +146,14 @@ normalized file extension and a SHA-256 digest of the original bytes, so retryin
 uploading the same content under another filename—returns the existing source instead of duplicating
 its chunks. A different file format is treated separately because it follows a different parser.
 
+### Playground
+
+Open **Playground** in Console to test a single question without creating a conversation. Each run
+shows the generated answer, ranked knowledge chunks, source titles, relevance scores, hit count,
+and retrieval/model/total latency. `top-k` and minimum relevance are request-local controls and do
+not change workspace retrieval settings. The browser keeps the latest 20 runs in local storage for
+comparison; clearing browser storage or using another browser removes that history.
+
 As a system-default alternative, set `ARIAD_EMBEDDING_MODEL` together with
 `ARIAD_MODEL_BASE_URL` and `ARIAD_MODEL_API_KEY`. A local OpenAI-compatible provider works too;
 for example, Ollama can use a Base URL such as `http://localhost:11434/v1`, an installed embedding

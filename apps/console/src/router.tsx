@@ -1,6 +1,12 @@
 import { createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
 
-import { AdministratorsPage, ConsoleShell, ConversationDetailPage, ConversationsPage, KnowledgeSourceDetailPage, KnowledgeSourcesPage, ModelConfigPage, OverviewPage, PlaygroundPage, ReviewDetailPage, ReviewQueuePage, VisitorsPage } from "./App";
+import { ConsoleShell, OverviewPage } from "./App";
+import { AdministratorsPage } from "./pages/AdministratorsPage";
+import { ConversationDetailPage, ConversationsPage, VisitorsPage } from "./pages/ConversationPages";
+import { KnowledgeSourceDetailPage, KnowledgeSourcesPage } from "./pages/KnowledgePages";
+import { PlaygroundPage } from "./pages/PlaygroundPage";
+import { ModelConfigPage } from "./pages/ModelConfigPage";
+import { ReviewDetailPage, ReviewQueuePage } from "./pages/ReviewPages";
 
 const rootRoute = createRootRoute({ component: ConsoleShell });
 const indexRoute = createRoute({

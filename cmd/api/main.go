@@ -14,6 +14,7 @@ import (
 	"ariad/internal/agent"
 	"ariad/internal/auth"
 	"ariad/internal/conversation"
+	"ariad/internal/evaluation"
 	"ariad/internal/ingestion"
 	"ariad/internal/knowledge"
 	"ariad/internal/modelconfig"
@@ -171,6 +172,16 @@ func newRouterWithAllServices(
 	authService *auth.Service,
 	visitorService *visitor.Service,
 ) http.Handler {
+	return newRouterWithEvaluationRepository(logger, modelAdapter, knowledgeRepository, conversationRepository, reviewRepository, pageFetcher, historyTurnLimit, modelConfigRepository, fallbackModelConfig, authService, visitorService, evaluation.NewMemoryRepository())
+}
+
+func newRouterWithEvaluationRepository(
+	logger *slog.Logger, modelAdapter runtime.Model, knowledgeRepository knowledge.Repository,
+	conversationRepository conversation.Repository, reviewRepository review.Repository,
+	pageFetcher ingestion.Fetcher, historyTurnLimit int,
+	modelConfigRepository modelconfig.Repository, fallbackModelConfig modelconfig.Config,
+	authService *auth.Service, visitorService *visitor.Service, evaluationRepository evaluation.Repository,
+) http.Handler {
 	environmentEmbedder, embedderErr := platformmodel.NewEmbedderFromEnvironment()
 	if embedderErr != nil {
 		panic(fmt.Errorf("configure embedding adapter: %w", embedderErr))
@@ -198,6 +209,7 @@ func newRouterWithAllServices(
 	workspaceModel := platformmodel.NewWorkspaceModel(modelConfigService, modelAdapter)
 	runtimeService := runtime.NewService(agentReader, retrievalService, workspaceModel)
 	playgroundService := playground.NewService(agentReader, knowledgeService, retrievalService, workspaceModel, modelConfigService)
+	evaluationService := evaluation.NewService(evaluationRepository, knowledgeService, retrievalService, modelConfigService)
 	conversationService := conversation.NewService(
 		conversationRepository,
 		runtimeService,
@@ -208,7 +220,7 @@ func newRouterWithAllServices(
 	// identifiers derived from an authenticated token/session. Request-body IDs
 	// are compatibility fields to validate, never the authority used downstream.
 	scope := requestScope{workspaceID: developmentWorkspaceID, agentID: developmentAgentID}
-	return newRouterWithServices(logger, scope, knowledgeService, ingestionService, conversationService, playgroundService, reviewService, modelConfigService, authService, visitorService)
+	return newRouterWithServices(logger, scope, knowledgeService, ingestionService, conversationService, playgroundService, evaluationService, reviewService, modelConfigService, authService, visitorService)
 }
 
 func newConfiguredRouter(
@@ -258,7 +270,7 @@ func newConfiguredRouter(
 		return nil, nil, fmt.Errorf("bootstrap administrator: %w", err)
 	}
 	logBootstrapAdministrator(logger, administrator, password, created)
-	handler := newRouterWithAllServices(
+	handler := newRouterWithEvaluationRepository(
 		logger,
 		modelAdapter,
 		database.NewKnowledgeRepository(postgres),
@@ -270,6 +282,7 @@ func newConfiguredRouter(
 		fallbackConfig,
 		authService,
 		visitor.NewService(database.NewVisitorRepository(postgres), visitor.DefaultSessionTTL),
+		database.NewEvaluationRepository(postgres),
 	)
 	return handler, postgres.Close, nil
 }
@@ -281,6 +294,7 @@ func newRouterWithServices(
 	ingestionService ingestion.URLSubmitter,
 	conversationService conversation.QuestionService,
 	playgroundService *playground.Service,
+	evaluationService *evaluation.Service,
 	reviewService *review.Service,
 	modelConfigService *modelconfig.Service,
 	authService *auth.Service,
@@ -293,6 +307,7 @@ func newRouterWithServices(
 		ingestion:    ingestionService,
 		conversation: conversationService,
 		playground:   playgroundService,
+		evaluation:   evaluationService,
 		review:       reviewService,
 		modelConfig:  modelConfigService,
 		auth:         authService,
@@ -335,6 +350,17 @@ func newRouterWithServices(
 			management.Post("/api/v1/knowledge/sources/{source_id}/reprocess", handlers.reprocessKnowledgeSource)
 			management.Post("/api/v1/ingestion/url", handlers.submitURL)
 			management.Post("/api/v1/playground/ask", handlers.askPlayground)
+			management.Get("/api/v1/evaluation/test-sets", handlers.listEvaluationTestSets)
+			management.Post("/api/v1/evaluation/test-sets", handlers.createEvaluationTestSet)
+			management.Get("/api/v1/evaluation/test-sets/{set_id}", handlers.getEvaluationTestSet)
+			management.Put("/api/v1/evaluation/test-sets/{set_id}", handlers.renameEvaluationTestSet)
+			management.Delete("/api/v1/evaluation/test-sets/{set_id}", handlers.deleteEvaluationTestSet)
+			management.Post("/api/v1/evaluation/test-sets/{set_id}/cases", handlers.createEvaluationTestCase)
+			management.Put("/api/v1/evaluation/test-sets/{set_id}/cases/{case_id}", handlers.updateEvaluationTestCase)
+			management.Delete("/api/v1/evaluation/test-sets/{set_id}/cases/{case_id}", handlers.deleteEvaluationTestCase)
+			management.Post("/api/v1/evaluation/test-sets/{set_id}/runs", handlers.runEvaluation)
+			management.Get("/api/v1/evaluation/test-sets/{set_id}/runs", handlers.listEvaluationRuns)
+			management.Get("/api/v1/evaluation/runs/{run_id}", handlers.getEvaluationRun)
 			management.Get("/api/v1/conversations", handlers.listConversations)
 			management.Get("/api/v1/visitors", handlers.listVisitors)
 			management.Get("/api/v1/visitors/{visitor_id}/conversations", handlers.listVisitorConversations)
@@ -359,6 +385,7 @@ type apiHandlers struct {
 	ingestion    ingestion.URLSubmitter
 	conversation conversation.QuestionService
 	playground   *playground.Service
+	evaluation   *evaluation.Service
 	review       *review.Service
 	modelConfig  *modelconfig.Service
 	auth         *auth.Service

@@ -54,6 +54,17 @@ export interface PlaygroundAskResponse {
   model_duration_ms: number;
 }
 
+export interface EvaluationTestCase { case_id: string; question: string; expected_source_id: string; note: string; created_at: string; updated_at: string; }
+export interface EvaluationTestSet { set_id: string; name: string; cases: EvaluationTestCase[]; created_at: string; updated_at: string; }
+export interface ListEvaluationTestSetsResponse { workspace_id: string; test_sets: EvaluationTestSet[]; }
+export interface EvaluationTestSetRequest { workspace_id: string; name: string; }
+export interface EvaluationTestCaseRequest { workspace_id: string; question: string; expected_source_id: string; note: string; }
+export interface EvaluationHit { source_id: string; source_title: string; score: number; }
+export interface EvaluationCaseResult { case_id: string; question: string; expected_source_id: string; expected_source_title: string; outcome: "passed" | "failed" | "source_missing"; hits: EvaluationHit[]; }
+export interface EvaluationRun { run_id: string; set_id: string; set_name: string; top_k: number; threshold: number; total_count: number; evaluable_count: number; passed_count: number; source_missing_count: number; pass_rate: number; results: EvaluationCaseResult[]; created_at: string; }
+export interface EvaluationRunRequest { workspace_id: string; top_k?: number; threshold?: number; }
+export interface ListEvaluationRunsResponse { workspace_id: string; runs: EvaluationRun[]; }
+
 export interface SubmitURLRequest {
   workspace_id: string;
   url: string;
